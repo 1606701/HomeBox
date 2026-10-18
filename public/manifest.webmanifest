@@ -1,0 +1,20 @@
+{
+  "name": "HomeBox · 家里的东西在哪",
+  "short_name": "HomeBox",
+  "description": "家庭收纳检索工具，快速查到东西放在家里的哪个位置",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f4ee",
+  "theme_color": "#f7f4ee",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

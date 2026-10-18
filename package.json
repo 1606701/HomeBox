@@ -1,0 +1,24 @@
+{
+  "name": "homebox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "家里的东西在哪 · 零依赖的家庭收纳检索服务，跑在树莓派 / 香橙派上",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "home-inventory",
+    "收纳",
+    "raspberry-pi",
+    "orange-pi",
+    "self-hosted",
+    "零依赖"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}

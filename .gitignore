@@ -1,0 +1,16 @@
+# 个人数据：db.json 里是你家的位置与物品，照片目录里是你拍的东西，都不该进版本库。
+# 首次启动时服务器会自动创建 data 目录并写入一份示例数据。
+data/
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 依赖
+node_modules/
+
+# 编辑器
+.vscode/
+.idea/

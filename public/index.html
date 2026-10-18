@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>HomeBox · 家里的东西在哪</title>
+<meta name="theme-color" content="#f7f4ee" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="HomeBox" />
+<meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
+<link rel="icon" href="favicon.svg" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="stylesheet" href="style.css?v=7" />
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" aria-hidden="true"></span>
+      <h1>HomeBox</h1>
+    </div>
+    <div class="searchwrap">
+      <input
+        id="search"
+        type="search"
+        placeholder="找什么？试试「电池」「创可贴」"
+        autocomplete="off"
+        enterkeyhint="search"
+        aria-label="搜索家里的物品"
+      />
+    </div>
+  </header>
+
+  <main class="content">
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-n" id="stat-items">0</span>
+        <span class="stat-l">件东西</span>
+      </div>
+      <div class="stat">
+        <span class="stat-n" id="stat-locs">0</span>
+        <span class="stat-l">个位置</span>
+      </div>
+      <div class="stat">
+        <span class="stat-n" id="stat-loose">0</span>
+        <span class="stat-l">还没归位</span>
+      </div>
+    </div>
+
+    <section id="view-search" class="view is-active" aria-label="搜索结果">
+      <div id="results" class="results"></div>
+      <p class="ver-line" id="app-ver"></p>
+    </section>
+
+    <section id="view-map" class="view" aria-label="收纳位置地图">
+      <div class="segmented" role="tablist">
+        <button class="seg is-active" data-mode="map" role="tab">地图</button>
+        <button class="seg" data-mode="list" role="tab">列表</button>
+      </div>
+
+      <div id="pane-map">
+        <!-- 家的俯视图 -->
+        <div id="map-home">
+          <div class="plan-head">
+            <div>
+              <p class="plan-title">家的地图</p>
+              <p class="plan-sub" id="plan-tip">点柜子、抽屉这些家具，看里面每一格放了什么</p>
+            </div>
+            <button id="toggle-edit" class="mini">编辑户型</button>
+          </div>
+
+          <div id="plan-tools" class="plan-tools" hidden>
+            <button type="button" id="add-room" class="mini">+ 加房间</button>
+            <button type="button" id="add-furniture" class="mini">+ 加家具</button>
+            <button type="button" id="plan-scale" class="mini">户型尺寸</button>
+          </div>
+
+          <div id="scale-row" class="scale-row" hidden>
+            <label class="scale-label">
+              家的实际宽度
+              <input id="scale-m" type="number" min="2" max="60" step="0.5" />
+              米
+            </label>
+            <button type="button" id="scale-save" class="mini">按这个换算</button>
+          </div>
+
+          <div class="plan-outer">
+            <svg id="floorplan" viewBox="0 0 100 88" preserveAspectRatio="xMidYMid meet"
+                 role="img" aria-label="家的俯视平面图"></svg>
+          </div>
+
+          <div id="plan-editor" class="editor" hidden>
+            <div class="ed-head">
+              <span class="ed-title" id="ed-title"></span>
+              <button type="button" id="ed-del" class="mini danger">删除</button>
+            </div>
+            <label class="field">
+              <span class="label-text">名称</span>
+              <input id="ed-name" autocomplete="off" />
+            </label>
+            <div class="row">
+              <label class="field half">
+                <span class="label-text">宽（格）</span>
+                <input id="ed-w" type="number" min="2" max="100" step="1" />
+              </label>
+              <label class="field half">
+                <span class="label-text">高（格）</span>
+                <input id="ed-h" type="number" min="2" max="88" step="1" />
+              </label>
+            </div>
+            <div class="field" id="ed-parent-row">
+              <span class="label-text">属于哪个位置</span>
+              <select id="ed-parent"></select>
+            </div>
+            <p class="ed-meta" id="ed-meta"></p>
+            <div class="actions">
+              <button type="button" id="ed-save" class="primary">保存修改</button>
+              <button type="button" id="ed-cancel" class="ghost">取消选中</button>
+            </div>
+          </div>
+
+          <div id="map-detail" class="detail"></div>
+        </div>
+
+        <!-- 家具内部视图 -->
+        <div id="map-inner" hidden>
+          <div class="inner-head">
+            <button id="inner-back" class="mini">← 返回</button>
+            <div class="inner-meta">
+              <p class="inner-title" id="inner-title"></p>
+              <p class="inner-path" id="inner-path"></p>
+            </div>
+          </div>
+          <div id="cells" class="cells"></div>
+          <div class="add-cell">
+            <input id="cell-name" placeholder="加个格子，比如：中层左侧" autocomplete="off" />
+            <button id="add-cell" class="mini">添加</button>
+          </div>
+          <div id="inner-detail" class="detail"></div>
+        </div>
+      </div>
+
+      <div id="pane-list" hidden>
+        <div id="tree-list" class="tree"></div>
+        <div id="loc-items" class="loc-items"></div>
+      </div>
+
+      <div class="charts card">
+        <p class="chart-title">标签分布</p>
+        <div id="chart-tags" class="bars"></div>
+        <p class="chart-title space">每个房间放了多少</p>
+        <div id="chart-rooms" class="bars"></div>
+      </div>
+    </section>
+
+    <section id="view-wardrobe" class="view" aria-label="衣柜">
+
+      <!-- 今日穿什么 -->
+      <div class="card outfit-card">
+        <div class="plan-head">
+          <div>
+            <p class="plan-title">今日穿什么</p>
+            <p class="plan-sub">按季节搭一套，优先推荐最近少穿的</p>
+          </div>
+          <button id="outfit-reroll" class="mini">换一套</button>
+        </div>
+        <div class="segmented season-seg" id="season-seg">
+          <button class="seg" data-season="spring" role="tab">春</button>
+          <button class="seg" data-season="summer" role="tab">夏</button>
+          <button class="seg" data-season="autumn" role="tab">秋</button>
+          <button class="seg" data-season="winter" role="tab">冬</button>
+        </div>
+        <div id="outfit" class="outfit"></div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-n" id="wb-total">0</span>
+          <span class="stat-l">件衣服</span>
+        </div>
+        <div class="stat">
+          <span class="stat-n" id="wb-ready">0</span>
+          <span class="stat-l">本季可穿</span>
+        </div>
+        <div class="stat">
+          <span class="stat-n" id="wb-away">0</span>
+          <span class="stat-l">待洗 / 收起</span>
+        </div>
+      </div>
+
+      <!-- 多维筛选 -->
+      <div class="card filters">
+        <p class="chart-title">按条件找</p>
+        <div class="chip-row">
+          <span class="chip-k">类别</span>
+          <span class="chip-set" id="chip-type"></span>
+        </div>
+        <div class="chip-row">
+          <span class="chip-k">季节</span>
+          <span class="chip-set" id="chip-season"></span>
+        </div>
+        <div class="chip-row">
+          <span class="chip-k">颜色</span>
+          <span class="chip-set" id="chip-color"></span>
+        </div>
+        <div class="chip-row">
+          <span class="chip-k">状态</span>
+          <span class="chip-set" id="chip-status"></span>
+        </div>
+        <div class="filter-foot">
+          <span class="hint-inline" id="filter-count"></span>
+          <button type="button" id="clear-filter" class="linkbtn">清空筛选</button>
+        </div>
+      </div>
+
+      <div id="garments" class="garments"></div>
+
+      <!-- 添一件衣服 -->
+      <div class="card gform-card">
+        <button type="button" id="toggle-gform" class="linkbtn">+ 添一件衣服</button>
+        <form id="garment-form" class="gform" hidden>
+          <label class="field">
+            <span class="label-text">叫什么</span>
+            <input id="g-name" placeholder="比如：藏青薄针织衫" autocomplete="off" />
+          </label>
+
+          <div class="row">
+            <label class="field half">
+              <span class="label-text">类别</span>
+              <select id="g-type"></select>
+            </label>
+            <label class="field half">
+              <span class="label-text">尺码</span>
+              <input id="g-size" placeholder="M / 32 / 42" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="field">
+            <span class="label-text">适合哪些季节</span>
+            <div class="toggle-set" id="g-seasons"></div>
+          </div>
+
+          <div class="field">
+            <span class="label-text">什么颜色（会显示成色块）</span>
+            <div class="toggle-set colors" id="g-colors"></div>
+          </div>
+
+          <label class="field">
+            <span class="label-text">放在哪</span>
+            <select id="g-loc"></select>
+          </label>
+
+          <div class="field">
+            <span class="label-text">照片<span class="label-opt">选填，比文字描述快得多</span></span>
+            <div class="photo-row">
+              <div id="g-photo-preview" class="photo-preview" hidden>
+                <img id="g-photo-img" alt="这件衣服的照片" />
+                <button type="button" id="g-photo-del" class="photo-x" aria-label="移除照片">×</button>
+              </div>
+              <div class="photo-btns">
+                <button type="button" class="mini" id="g-photo-take">拍照</button>
+                <button type="button" class="mini" id="g-photo-pick">从相册选</button>
+              </div>
+            </div>
+            <input id="g-photo-file" type="file" accept="image/*" hidden />
+          </div>
+
+          <div class="row">
+            <label class="field half">
+              <span class="label-text">状态</span>
+              <select id="g-status"></select>
+            </label>
+            <label class="field half">
+              <span class="label-text">场合</span>
+              <input id="g-occasions" placeholder="通勤,休闲" autocomplete="off" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="label-text">备注</span>
+            <textarea id="g-note" rows="2" placeholder="选填，比如「容易起球，别和拉链的一起洗」"></textarea>
+          </label>
+
+          <div class="actions">
+            <button type="submit" class="primary" id="g-submit">保存</button>
+            <button type="button" id="g-cancel" class="ghost" hidden>取消编辑</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="view-add" class="view" aria-label="记录新物品">
+      <form id="item-form" class="card form">
+        <h2 id="form-title">记一件东西</h2>
+
+        <label class="field">
+          <span class="label-text">叫什么</span>
+          <input id="f-name" required placeholder="比如：指甲刀" autocomplete="off" />
+        </label>
+
+        <div class="field">
+          <span class="label-text">放在哪</span>
+          <select id="f-loc" aria-label="选择收纳位置"></select>
+        </div>
+
+        <div class="field newloc">
+          <button type="button" id="toggle-newloc" class="linkbtn">+ 新建一个收纳位置</button>
+          <div id="newloc-row" class="newloc-row" hidden>
+            <input id="f-newloc" placeholder="位置名称，比如：电视柜左侧抽屉" autocomplete="off" />
+            <select id="f-newloc-parent" aria-label="上级位置"></select>
+            <button type="button" id="create-loc" class="ghost">创建</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <label class="field half">
+            <span class="label-text">数量</span>
+            <input id="f-qty" type="number" min="1" step="1" value="1" />
+          </label>
+          <label class="field half">
+            <span class="label-text">标签</span>
+            <input id="f-tags" placeholder="逗号分隔，选填" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="field">
+          <span class="label-text">照片<span class="label-opt">选填，找的时候一眼认出它</span></span>
+          <div class="photo-row">
+            <div id="f-photo-preview" class="photo-preview" hidden>
+              <img id="f-photo-img" alt="这件东西的照片" />
+              <button type="button" id="f-photo-del" class="photo-x" aria-label="移除照片">×</button>
+            </div>
+            <div class="photo-btns">
+              <button type="button" class="mini" id="f-photo-take">拍照</button>
+              <button type="button" class="mini" id="f-photo-pick">从相册选</button>
+            </div>
+          </div>
+          <input id="f-photo-file" type="file" accept="image/*" hidden />
+        </div>
+
+        <label class="field">
+          <span class="label-text">备注</span>
+          <textarea id="f-note" rows="2" placeholder="选填，比如「和挖耳勺放在一起」"></textarea>
+        </label>
+
+        <div class="actions">
+          <button type="submit" class="primary" id="submit-btn">保存</button>
+          <button type="button" id="cancel-edit" class="ghost" hidden>取消编辑</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <nav class="tabbar" role="navigation" aria-label="主导航">
+    <button class="tab is-active" data-tab="search" aria-label="找东西">
+      <span class="tab-ico ico-search" aria-hidden="true"></span>找东西
+    </button>
+    <button class="tab" data-tab="map" aria-label="地图">
+      <span class="tab-ico ico-map" aria-hidden="true"></span>地图
+    </button>
+    <button class="tab" data-tab="wardrobe" aria-label="衣柜">
+      <span class="tab-ico ico-wardrobe" aria-hidden="true"></span>衣柜
+    </button>
+    <button class="tab" data-tab="add" aria-label="记一件">
+      <span class="tab-ico ico-add" aria-hidden="true"></span>记一件
+    </button>
+  </nav>
+</div>
+
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-label="查看照片">
+  <button type="button" class="lightbox-close" id="lb-close" aria-label="关闭">×</button>
+  <img id="lb-img" alt="物品照片" />
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="app.js?v=7"></script>
+</body>
+</html>

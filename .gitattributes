@@ -1,0 +1,2 @@
+# 统一用 LF，避免在 Windows 上提交的文件带着 CRLF 跑到树莓派上去
+* text=auto eol=lf
