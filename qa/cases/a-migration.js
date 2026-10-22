@@ -651,6 +651,18 @@ function register(runner, ctx) {
       // 所以「删掉那句 PRAGMA foreign_keys = ON」并不会立刻出问题——
       // 真正的失效路径是有人传 enableForeignKeyConstraints:false，或手动 PRAGMA OFF，
       // 或者将来 Node 改了这个默认值。这些情况本条用例都会红。
+      //
+      // 已知盲区（刻意保留，不是漏测）：下面 5 条里，
+      //   journal_mode(wal vs delete) / busy_timeout(5000 vs 0) / synchronous(1 vs 2)
+      //     → 删掉对应那行，本条会红；
+      //   foreign_keys(1) / wal_autocheckpoint(1000)
+      //     → 二者的默认值恰好就等于我们要的值，删掉那行读出来还是 1 / 1000，本条抓不到。
+      // 但「删掉后行为不变」本身就不是回归，所以不补源码层 grep 那种脆弱断言。
+      // 本条真正守的是「有人把这些值改成别的」以及「将来 Node 改默认值」——
+      // 这两种情况读出来的值都会变，断言会红。
+      //
+      // 另：`:memory:` 库的 journal_mode 是 memory 而不是 wal，所以这里必须用真实文件；
+      // 生产代码目前没有任何 :memory: 调用点。
       const dir = util.makeTempDir('hb-qa-pragma-');
       const file = path.join(dir, 'pragma.db');
       const db = require('../../lib/db');
