@@ -640,6 +640,60 @@ function register(runner, ctx) {
         util.rmrf(dir);
       }
     }, { repro: 'node --disable-warning=ExperimentalWarning qa/qa-p1.js --only A17' });
+
+  runner.test('A18', '连接契约：lib/db.js 打开后的 5 条 PRAGMA 真的生效，且事务结束后自动复位',
+    async () => {
+      // 为什么要有这条：A17 是「行为层」的间接断言（靠 ON DELETE SET NULL 观察外键是否在线），
+      // 这条是「配置层」的直接断言——直接读 PRAGMA，能一眼定位是谁把哪一项改坏了。
+      //
+      // 背景（实测过的事实，别搞混）：SQLite 原生 foreign_keys 默认 OFF，
+      // 但 node:sqlite 的 DatabaseSync 在构造时默认 enableForeignKeyConstraints = true，
+      // 所以「删掉那句 PRAGMA foreign_keys = ON」并不会立刻出问题——
+      // 真正的失效路径是有人传 enableForeignKeyConstraints:false，或手动 PRAGMA OFF，
+      // 或者将来 Node 改了这个默认值。这些情况本条用例都会红。
+      const dir = util.makeTempDir('hb-qa-pragma-');
+      const file = path.join(dir, 'pragma.db');
+      const db = require('../../lib/db');
+      try {
+        db.open(file);
+        db.migrateSchema();
+        const readOne = (sql) => {
+          const row = db.get().prepare(sql).get();
+          const key = Object.keys(row)[0];
+          return Number(row[key]);
+        };
+        expect.eq(readOne('PRAGMA foreign_keys'), 1,
+          'foreign_keys 必须为 1（否则 ON DELETE SET NULL 静默失效）');
+        expect.eq(String(db.get().prepare('PRAGMA journal_mode').get().journal_mode), 'wal',
+          'journal_mode 应为 wal');
+        expect.eq(readOne('PRAGMA busy_timeout'), 5000, 'busy_timeout 应为 5000');
+        expect.eq(readOne('PRAGMA synchronous'), 1, 'synchronous 应为 1(NORMAL)');
+        expect.eq(readOne('PRAGMA wal_autocheckpoint'), 1000, 'wal_autocheckpoint 应为 1000');
+
+        // defer_foreign_keys 必须是「事务内开、事务后自动复位」，否则会污染运行期
+        expect.eq(readOne('PRAGMA defer_foreign_keys'), 0, '事务外 defer 应为 0');
+        db.tx(() => {
+          db.exec('PRAGMA defer_foreign_keys = ON');
+          expect.eq(readOne('PRAGMA defer_foreign_keys'), 1, '事务内 defer 应为 1');
+        });
+        expect.eq(readOne('PRAGMA defer_foreign_keys'), 0, 'COMMIT 后 defer 必须回到 0');
+        expect.eq(readOne('PRAGMA foreign_keys'), 1, 'COMMIT 后 foreign_keys 仍必须为 1');
+
+        // 事务外再验一次「外键是即时校验的」：插一条悬空引用必须立刻失败
+        db.get().exec('CREATE TABLE IF NOT EXISTS fk_probe (id TEXT PRIMARY KEY, ' +
+          'pid TEXT REFERENCES fk_probe(id))');
+        let rejected = false;
+        try {
+          db.get().prepare('INSERT INTO fk_probe (id, pid) VALUES (?, ?)').run('x', 'nope');
+        } catch (err) {
+          rejected = /FOREIGN KEY/i.test(err.message);
+        }
+        expect.ok(rejected, '事务外插入悬空外键必须被立刻拒绝（说明外键是即时校验的）');
+      } finally {
+        try { db.close(); } catch (err) { /* 已关 */ }
+        util.rmrf(dir);
+      }
+    }, { repro: 'node --disable-warning=ExperimentalWarning qa/qa-p1.js --only A18' });
 }
 
 module.exports = { register, readSource, clone, migrateWith };
