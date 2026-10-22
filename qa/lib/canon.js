@@ -53,6 +53,14 @@ function maskField(ctx, key, value) {
   return value;
 }
 
+// P2 故意新增/改变的字段。做「新旧逐字节对照」时先剔掉它们，
+// 否则每条断言都会被「多了一个字段」拖红，掩盖真正的回归。
+// 这些字段的正确性由 qa/qa-p2.js 单独覆盖，不在这里比。
+const P2_ONLY = new Set([
+  'category', 'state', 'ownerId', 'ownerName',
+  'priceCents', 'valueCents', 'buyDate', 'owners', 'currency'
+]);
+
 /**
  * 递归归一化一整棵响应。
  * @param {*} value 原始值
@@ -64,6 +72,7 @@ function canon(value, ctx) {
   if (value && typeof value === 'object') {
     const out = {};
     for (const key of Object.keys(value)) {
+      if (P2_ONLY.has(key)) continue;
       const v = value[key];
       if (v && typeof v === 'object') {
         out[key] = key === 'id' ? v : canon(v, ctx);
@@ -144,7 +153,10 @@ function shape(value) {
   }
   if (typeof value === 'object') {
     const out = {};
-    for (const key of Object.keys(value)) out[key] = shape(value[key]);
+    for (const key of Object.keys(value)) {
+      if (P2_ONLY.has(key)) continue;
+      out[key] = shape(value[key]);
+    }
     return out;
   }
   return typeof value;

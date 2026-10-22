@@ -6,10 +6,20 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v7';
+  var APP_VERSION = 'v8';
+
+  // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
+  var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
+  var STATES = [
+    { k: 'in_use', n: '在用' },
+    { k: 'used_up', n: '用完了' },
+    { k: 'lent', n: '借出了' },
+    { k: 'discarded', n: '已丢弃' }
+  ];
 
   var state = {
     tab: 'search',
+    prevTab: 'search',
     mapMode: 'map',
     tree: [],
     flat: [],
@@ -23,6 +33,15 @@
     selId: null,
     settings: null,
     renamingCell: null,
+    auth: {
+      me: null,
+      members: [],
+      caps: {},
+      roles: [],
+      needSetup: false,
+      bootstrap: false
+    },
+    stats: { by: 'loc', data: null, loading: false },
     wb: {
       loaded: false,
       stale: true,
@@ -31,7 +50,7 @@
       facets: null,
       season: '',
       pickedSeason: '',
-      filters: { type: '', season: '', color: '', status: '' },
+      filters: { type: '', season: '', color: '', status: '', owner: '' },
       editingId: null
     }
   };
@@ -55,8 +74,60 @@
 
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+  // 能力判断全部走后端下发的 caps：前端只是不显示不该有的东西
+  function can(cap) {
+    return !!(state.auth.caps && state.auth.caps[cap]);
+  }
+
+  function thousands(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  // 分 → ¥。null 一律是「未记价」，绝不能显示成 ¥0
+  function formatMoney(cents) {
+    if (cents == null || cents === '') return '未记价';
+    var n = Number(cents);
+    if (!isFinite(n)) return '未记价';
+    var neg = n < 0;
+    n = Math.abs(Math.round(n));
+    var yuan = Math.floor(n / 100);
+    var rest = n - yuan * 100;
+    var out = '¥' + thousands(yuan);
+    if (rest) out += '.' + (rest < 10 ? '0' : '') + rest;
+    return (neg ? '-' : '') + out;
+  }
+
+  // 统计条位置窄，万元级折成「¥1.2万」，其余保持和其它地方一致的精确金额
+  function formatMoneyCompact(cents) {
+    if (cents == null || cents === '') return '—';
+    var n = Number(cents);
+    if (!isFinite(n)) return '—';
+    var yuan = n / 100;
+    if (yuan >= 10000) {
+      var w = yuan / 10000;
+      return '¥' + (w >= 10 ? Math.round(w) : Math.round(w * 10) / 10) + '万';
+    }
+    return formatMoney(cents);
+  }
+
+  function roleName(k) {
+    var hit = (state.auth.roles || []).filter(function (r) { return r.k === k; })[0];
+    return hit ? hit.n : (k || '');
+  }
+
+  function memberName(id) {
+    if (!id) return '共用';
+    var hit = (state.auth.members || []).filter(function (m) { return m.id === id; })[0];
+    return hit ? hit.name : '已删除成员';
+  }
+
   function api(url, options) {
-    return fetch(url, Object.assign({ headers: { 'Content-Type': 'application/json' } }, options || {}))
+    var opts = Object.assign({
+      // 同源本来就会带 Cookie，写明是为了以后加子域时别踩坑
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }
+    }, options || {});
+    return fetch(url, opts)
       .then(function (res) {
         return res.json().catch(function () { throw new Error('服务端返回异常'); });
       })
@@ -283,6 +354,13 @@
     var tags = (item.tags || []).map(function (t) {
       return '<span class="tag">' + esc(t) + '</span>';
     }).join('');
+    var acts = '';
+    if (can('write')) {
+      acts += '<button type="button" class="mini" data-act="edit" data-id="' + esc(item.id) + '">编辑</button>';
+    }
+    if (can('remove')) {
+      acts += '<button type="button" class="mini danger" data-act="del" data-id="' + esc(item.id) + '">删除</button>';
+    }
     return '' +
       '<article class="result' + (item.photo ? ' ph' : '') + '">' +
         thumbHtml(item) +
@@ -294,12 +372,26 @@
           '<div class="result-path">' + esc(item.path) + '</div>' +
           (item.note ? '<div class="result-note">' + esc(item.note) + '</div>' : '') +
           (tags ? '<div class="result-tags">' + tags + '</div>' : '') +
-          '<div class="result-actions">' +
-            '<button type="button" class="mini" data-act="edit" data-id="' + esc(item.id) + '">编辑</button>' +
-            '<button type="button" class="mini danger" data-act="del" data-id="' + esc(item.id) + '">删除</button>' +
-          '</div>' +
+          (acts ? '<div class="result-actions">' + acts + '</div>' : '') +
+          itemBadges(item) +
         '</div>' +
       '</article>';
+  }
+
+  // 右下角三个小角标：金额（没权限整块不出现）、类目、归属人
+  function itemBadges(item) {
+    var out = '';
+    if (can('seePrice')) {
+      // 服务端对无权限角色是「删 key」而不是置 0，必须判断 key 是否存在
+      if ('valueCents' in item && item.valueCents != null) {
+        out += '<span class="badge badge-money">' + esc(formatMoney(item.valueCents)) + '</span>';
+      } else {
+        out += '<span class="badge badge-muted">未记价</span>';
+      }
+    }
+    if (item.category) out += '<span class="badge">' + esc(item.category) + '</span>';
+    out += '<span class="badge">' + esc(memberName(item.ownerId)) + '</span>';
+    return '<div class="result-badges">' + out + '</div>';
   }
 
   function renderItems(box, items, emptyHtml) {
@@ -317,7 +409,109 @@
     $('stat-items').textContent = state.items.length;
     $('stat-locs').textContent = state.flat.length;
     $('stat-loose').textContent = loose;
+
+    var wrap = $('stat-value-wrap');
+    var val = $('stat-value');
+    var bar = $('stats-bar');
+    if (wrap) wrap.hidden = !can('seePrice');
+    if (val) {
+      var totals = state.stats.data && state.stats.data.totals;
+      val.textContent = totals ? formatMoneyCompact(totals.inUseCents) : '—';
+    }
+    if (bar) {
+      bar.classList.toggle('four', can('seePrice'));
+      bar.classList.toggle('is-entry', can('stats'));
+      bar.setAttribute('tabindex', can('stats') ? '0' : '-1');
+    }
   }
+
+  /* ---------- 价值概览 ---------- */
+
+  function loadStats(by) {
+    if (!can('stats')) return Promise.resolve(null);
+    var dim = by || state.stats.by || 'loc';
+    state.stats.loading = true;
+    return api('/api/stats/value?by=' + encodeURIComponent(dim)).then(function (data) {
+      state.stats.loading = false;
+      state.stats.data = data;
+      state.stats.by = data.by || dim;
+      renderStats();
+      if (state.tab === 'stats') renderStatsView();
+      return data;
+    }).catch(function (err) {
+      state.stats.loading = false;
+      toast('统计没算出来：' + err.message);
+      return null;
+    });
+  }
+
+  function showStats() {
+    if (!can('stats')) return;
+    if (state.tab !== 'stats') state.prevTab = state.tab;
+    setTab('stats');
+    loadStats(state.stats.by);
+    renderStatsView();
+    window.scrollTo(0, 0);
+  }
+
+  function renderStatsView() {
+    var seg = $('stats-seg');
+    if (seg) {
+      Array.prototype.forEach.call(seg.querySelectorAll('.seg'), function (b) {
+        b.classList.toggle('is-active', b.dataset.by === state.stats.by);
+      });
+    }
+    var data = state.stats.data;
+    if (!data || !data.totals) {
+      $('sv-cover').textContent = state.stats.loading ? '正在算…' : '还没有可以统计的金额';
+      $('sv-groups').innerHTML = '<p class="hint">正在统计…</p>';
+      return;
+    }
+    var t = data.totals;
+    $('sv-inuse').textContent = formatMoney(t.inUseCents);
+    $('sv-all').textContent = formatMoney(t.allCents);
+    $('sv-cover').textContent = t.count + ' 件里有 ' + t.recorded + ' 件记了价，' +
+      t.unrecorded + ' 件未记录';
+
+    var groups = (data.groups || []).slice();
+    if (!groups.length) {
+      $('sv-groups').innerHTML = '<p class="hint">还没有可以统计的东西</p>';
+      return;
+    }
+    var max = 0;
+    groups.forEach(function (g) { if (g.valueCents > max) max = g.valueCents; });
+    $('sv-groups').innerHTML = groups.map(function (g) {
+      var pct = g.valueCents > 0 ? Math.max(3, Math.round(g.valueCents / (max || 1) * 100)) : 0;
+      return '<div class="bar-row">' +
+        '<span class="bar-k" title="' + esc(g.name) + '">' + esc(g.name) +
+          '<span class="cn">' + (g.count || 0) + ' 件</span></span>' +
+        '<span class="bar-track"><span class="bar-fill" style="width:' + pct + '%"></span></span>' +
+        '<span class="bar-v">' + esc(formatMoney(g.valueCents)) + '</span>' +
+      '</div>';
+    }).join('');
+  }
+
+  $('stats-bar').addEventListener('click', showStats);
+  $('stats-bar').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      showStats();
+    }
+  });
+
+  $('stats-back').addEventListener('click', function () {
+    setTab(state.prevTab === 'stats' ? 'search' : (state.prevTab || 'search'));
+  });
+
+  $('stats-seg').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.seg') : null;
+    if (!btn || !btn.dataset.by) return;
+    state.stats.by = btn.dataset.by;
+    Array.prototype.forEach.call(this.querySelectorAll('.seg'), function (b) {
+      b.classList.toggle('is-active', b.dataset.by === state.stats.by);
+    });
+    loadStats(state.stats.by);
+  });
 
   function barList(pairs, maxItems) {
     if (!pairs.length) return '';
@@ -396,7 +590,9 @@
       var label = prefix ? prefix + ' / ' + n.name : n.name;
       out.push({
         id: n.id, name: n.name, label: label, depth: depth, parent: n.parent,
-        kind: n.kind, box: n.box, itemCount: n.itemCount, totalCount: n.totalCount
+        kind: n.kind, box: n.box, itemCount: n.itemCount, totalCount: n.totalCount,
+        // 无权限角色拿不到这个 key，后面用 > 0 判断即可
+        valueCents: n.valueCents
       });
       if (n.children && n.children.length) flatten(n.children, out, label, depth + 1);
     });
@@ -489,17 +685,22 @@
     state.activeLocId = id;
     renderTree();
     paintPlan();
+    var cur = node(id);
+    var money = (can('seePrice') && cur && cur.valueCents > 0)
+      ? '<p class="loc-value">已记价 ' + esc(formatMoney(cur.valueCents)) + '</p>'
+      : '';
     return loadItems('').then(function (all) {
       var box = target || $('loc-items');
       var ids = collectSubtree(id);
       var list = all.filter(function (i) { return ids.indexOf(i.locId) !== -1; });
+      // 标题和金额必须先拼进来：renderItems 会整块替换 innerHTML
+      var head = '<p class="loc-title">' + esc(name) +
+        (list.length ? ' · ' + list.length + ' 件' : '') + '</p>' + money;
       if (!list.length) {
-        box.innerHTML = '<p class="loc-title">' + esc(name) + '</p>' +
-          '<p class="empty">这里还是空的</p>';
+        box.innerHTML = head + '<p class="empty">这里还是空的</p>';
         return;
       }
-      box.innerHTML = '<p class="loc-title">' + esc(name) + ' · ' + list.length + ' 件</p>';
-      renderItems(box, list, '');
+      box.innerHTML = head + '<div class="results">' + list.map(cardHtml).join('') + '</div>';
     });
   }
 
@@ -811,6 +1012,7 @@
     var bits = ['合计 ' + (n.totalCount || 0) + ' 件东西'];
     var area = areaText(n);
     if (area) bits.push('约 ' + area);
+    if (can('seePrice') && n.valueCents > 0) bits.push('已记价 ' + formatMoney(n.valueCents));
     if (n.kind === 'room') {
       var furn = state.flat.filter(function (x) {
         return x.parent === n.id && x.kind === 'furniture';
@@ -1041,6 +1243,42 @@
 
   /* ---------- 表单 ---------- */
 
+  function renderFormSelects() {
+    var cat = $('f-category');
+    if (cat) {
+      cat.innerHTML = '<option value="">未分类</option>' + CATEGORIES.map(function (c) {
+        return '<option value="' + esc(c) + '">' + esc(c) + '</option>';
+      }).join('');
+    }
+    var st = $('f-state');
+    if (st) {
+      st.innerHTML = STATES.map(function (s) {
+        return '<option value="' + esc(s.k) + '">' + esc(s.n) + '</option>';
+      }).join('');
+    }
+  }
+
+  // 归属人下拉：第一项「共用」，默认选当前登录人
+  function renderOwnerSelect() {
+    var sel = $('f-owner');
+    if (!sel) return;
+    var keep = sel.value;
+    sel.innerHTML = '<option value="">共用</option>' + (state.auth.members || []).map(function (m) {
+      return '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>';
+    }).join('');
+    var def = state.auth.me && state.auth.me.id !== 'm_bootstrap' ? state.auth.me.id : '';
+    var want = keep || def;
+    sel.value = want;
+    if (sel.value !== want) sel.value = '';
+  }
+
+  function resetMoreFields() {
+    if ($('f-price')) $('f-price').value = '';
+    if ($('f-buydate')) $('f-buydate').value = '';
+    if ($('f-category')) $('f-category').value = '';
+    if ($('f-state')) $('f-state').value = 'in_use';
+  }
+
   function resetForm() {
     state.editingId = null;
     itemPhotos.reset(null);
@@ -1051,19 +1289,25 @@
     $('f-note').value = '';
     $('f-qty').value = '1';
     $('f-tags').value = '';
+    resetMoreFields();
+    renderOwnerSelect();
+    if ($('f-more')) $('f-more').open = false;
   }
 
-  // 连续录入时位置要留着，但照片必须清掉，
-  // 否则上一件的照片会被挂到下一件东西上
+  // 连续录入时位置和归属人要留着，但照片和这件东西自己的金额必须清掉，
+  // 否则上一件的照片/价格会被挂到下一件东西上
   function clearBodyKeepLocation() {
     itemPhotos.reset(null);
     $('f-name').value = '';
     $('f-note').value = '';
     $('f-qty').value = '1';
     $('f-tags').value = '';
+    resetMoreFields();
+    if ($('f-more')) $('f-more').open = false;
   }
 
   function startEdit(id) {
+    if (!can('write')) { toast('当前身份只能看，不能改'); return; }
     var item = state.items.filter(function (i) { return i.id === id; })[0];
     if (!item) { toast('找不到这条记录，请重新搜索'); return; }
     state.editingId = id;
@@ -1075,12 +1319,24 @@
     $('f-qty').value = item.qty || 1;
     $('f-tags').value = (item.tags || []).join('、');
     $('f-note').value = item.note || '';
+    $('f-price').value = item.priceCents != null ? item.priceCents / 100 : '';
+    $('f-buydate').value = item.buyDate || '';
+    $('f-category').value = item.category || '';
+    $('f-state').value = item.state || 'in_use';
+    renderOwnerSelect();
+    $('f-owner').value = item.ownerId || '';
+    // 老数据这些字段都是空的，就不必展开折叠区
+    if ($('f-more')) {
+      $('f-more').open = !!(item.priceCents != null || item.buyDate ||
+        item.category || (item.state && item.state !== 'in_use'));
+    }
     itemPhotos.reset(item.photo);
     setTab('add');
     $('f-name').focus();
   }
 
   function removeItem(id) {
+    if (!can('remove')) { toast('当前身份不能删东西'); return; }
     var item = state.items.filter(function (i) { return i.id === id; })[0];
     var label = item ? item.name : '这条记录';
     if (!window.confirm('确定删除「' + label + '」吗？')) return;
@@ -1139,14 +1395,32 @@
 
   $('item-form').addEventListener('submit', function (e) {
     e.preventDefault();
+    if (!can('write')) { toast('当前身份只能看，不能记东西'); return; }
+
     var payload = {
       name: $('f-name').value.trim(),
       locId: $('f-loc').value || null,
       qty: Number($('f-qty').value) || 1,
       tags: $('f-tags').value,
-      note: $('f-note').value.trim()
+      note: $('f-note').value.trim(),
+      category: $('f-category').value || null,
+      buyDate: $('f-buydate').value || null,
+      ownerId: $('f-owner').value || null,
+      state: $('f-state').value || 'in_use'
     };
     if (!payload.name) { toast('总得有个名字吧'); return; }
+
+    // 价格只在看得到的身份下提交；留空就显式传 null（编辑时才能清掉旧价）
+    if (can('seePrice')) {
+      var raw = $('f-price').value.trim();
+      if (raw !== '') {
+        var yuan = Number(raw);
+        if (!isFinite(yuan) || yuan < 0) { toast('金额填个正数，或者留空'); return; }
+        payload.price = yuan;
+      } else {
+        payload.price = null;
+      }
+    }
 
     var isEdit = !!state.editingId;
     var targetId = state.editingId;
@@ -1173,12 +1447,12 @@
           resetForm();
           setTab('search');
           toast('已更新');
-          return doSearch();
+          return Promise.all([doSearch(), loadStats()]);
         }
         toast('记下了：' + payload.name + '（位置保留着，接着录下一件）');
         clearBodyKeepLocation();
         $('f-name').focus();
-        return Promise.all([loadLocations(), loadItems('')]).then(function () {
+        return Promise.all([loadLocations(), loadItems(''), loadStats()]).then(function () {
           renderStats();
           renderCharts();
         });
@@ -1264,7 +1538,11 @@
   });
 
   function suggestOutfit() {
-    return api('/api/wardrobe/suggest?season=' + encodeURIComponent(state.wb.pickedSeason))
+    var url = '/api/wardrobe/suggest?season=' + encodeURIComponent(state.wb.pickedSeason);
+    // 共用（空归属）后端没有对应的筛选参数，只能看全部——这里不传
+    var owner = state.wb.filters.owner;
+    if (owner && owner !== '__shared__') url += '&ownerId=' + encodeURIComponent(owner);
+    return api(url)
       .then(function (data) { renderOutfit(data); })
       .catch(function (err) {
         $('outfit').innerHTML = '<p class="hint">' + esc(err.message) + '</p>';
@@ -1338,6 +1616,11 @@
     var f = state.wb.facets;
     var d = state.wb.dict;
     if (!f || !d) return;
+    var owners = f.owners || {};
+    chipHtml($('chip-owner'), 'owner', Object.keys(owners).map(function (k) {
+      // 后端的 key 是 ownerId，空字符串代表共用；下拉里用哨兵避开「全部」的空值
+      return { k: k || '__shared__', n: k ? memberName(k) : '共用', c: owners[k] };
+    }).filter(function (x) { return x.c > 0; }));
     chipHtml($('chip-type'), 'type', d.types
       .map(function (t) { return { k: t.k, n: t.n, c: f.types[t.k] || 0 }; })
       .filter(function (x) { return x.c > 0; }));
@@ -1352,20 +1635,24 @@
       .filter(function (x) { return x.c > 0; }));
   }
 
-  ['chip-type', 'chip-season', 'chip-color', 'chip-status'].forEach(function (id) {
+  ['chip-owner', 'chip-type', 'chip-season', 'chip-color', 'chip-status'].forEach(function (id) {
     $(id).addEventListener('click', function (e) {
       var b = e.target.closest ? e.target.closest('.chip') : null;
       if (!b) return;
-      state.wb.filters[b.dataset.dim] = b.dataset.val;
+      var dim = b.dataset.dim;
+      state.wb.filters[dim] = b.dataset.val;
       renderChips();
       renderGarments();
+      // 「今日穿什么」跟着归属人走
+      if (dim === 'owner') suggestOutfit();
     });
   });
 
   $('clear-filter').addEventListener('click', function () {
-    state.wb.filters = { type: '', season: '', color: '', status: '' };
+    state.wb.filters = { type: '', season: '', color: '', status: '', owner: '' };
     renderChips();
     renderGarments();
+    suggestOutfit();
   });
 
   function filteredGarments() {
@@ -1376,6 +1663,11 @@
       if (f.season && (w.seasons || []).indexOf(f.season) === -1) return false;
       if (f.color && (w.colors || []).indexOf(f.color) === -1) return false;
       if (f.status && w.status !== f.status) return false;
+      if (f.owner === '__shared__') {
+        if (i.ownerId) return false;
+      } else if (f.owner && i.ownerId !== f.owner) {
+        return false;
+      }
       return true;
     });
   }
@@ -1402,20 +1694,25 @@
       ? '<img class="gsw is-photo" src="' + esc(photoUrl(g.photo)) + '" loading="lazy"' +
         ' alt="' + esc(g.name) + '" data-full="' + esc(photoUrl(g.photo)) + '" />'
       : '<span class="gsw" style="' + swatchCss(w.colors) + '"></span>';
+    var acts = '';
+    if (can('write')) {
+      acts += '<button type="button" class="mini" data-act="wore" data-id="' + esc(g.id) + '">今天穿了</button>' +
+        '<button type="button" class="mini" data-act="gedit" data-id="' + esc(g.id) + '">编辑</button>';
+    }
+    if (can('remove')) {
+      acts += '<button type="button" class="mini danger" data-act="gdel" data-id="' + esc(g.id) + '">删除</button>';
+    }
     return '<article class="gcard">' +
       media +
       '<span class="gbody">' +
-        '<span class="gtop"><span class="gname">' + esc(g.name) + '</span>' + badge + '</span>' +
+        '<span class="gtop"><span class="gname">' + esc(g.name) + '</span>' + badge +
+          '<span class="gbadge own">' + esc(memberName(g.ownerId)) + '</span></span>' +
         '<span class="gmeta">' + esc(meta) + '</span>' +
         '<span class="gpath">' + esc(g.path) + '</span>' +
         '<span class="gfoot">' + esc(wornText(w)) + ' · 共 ' + (w.wearCount || 0) + ' 次' +
           esc(occasions) + '</span>' +
       '</span>' +
-      '<span class="gacts">' +
-        '<button type="button" class="mini" data-act="wore" data-id="' + esc(g.id) + '">今天穿了</button>' +
-        '<button type="button" class="mini" data-act="gedit" data-id="' + esc(g.id) + '">编辑</button>' +
-        '<button type="button" class="mini danger" data-act="gdel" data-id="' + esc(g.id) + '">删除</button>' +
-      '</span>' +
+      (acts ? '<span class="gacts">' + acts + '</span>' : '') +
     '</article>';
   }
 
@@ -1424,7 +1721,9 @@
     if (!state.wb.items.length) {
       box.innerHTML = '<div class="empty-box">' +
         '<p class="empty">衣柜还是空的</p>' +
-        '<button id="load-demo" class="mini">放几件示例衣服进来看看效果</button>' +
+        (can('write')
+          ? '<button id="load-demo" class="mini">放几件示例衣服进来看看效果</button>'
+          : '') +
         '</div>';
       var btn = $('load-demo');
       if (btn) btn.addEventListener('click', loadDemo);
@@ -1441,6 +1740,7 @@
   }
 
   function loadDemo() {
+    if (!can('write')) { toast('当前身份不能加东西'); return; }
     api('/api/wardrobe/demo', { method: 'POST' }).then(function (data) {
       toast('已放入 ' + data.added + ' 件示例衣服（放进「' + data.wardrobe + '」）');
       return Promise.all([loadLocations(), loadWardrobe(), doSearch()]);
@@ -1520,6 +1820,7 @@
   });
 
   function startGarmentEdit(id) {
+    if (!can('write')) { toast('当前身份只能看，不能改'); return; }
     var g = state.wb.items.filter(function (x) { return x.id === id; })[0];
     if (!g) { toast('找不到这件衣服'); return; }
     var w = g.wear;
@@ -1548,6 +1849,7 @@
 
   $('garment-form').addEventListener('submit', function (e) {
     e.preventDefault();
+    if (!can('write')) { toast('当前身份只能看，不能记衣服'); return; }
     var name = $('g-name').value.trim();
     if (!name) { toast('总得有个名字吧'); return; }
     var isEdit = !!state.wb.editingId;
@@ -1599,6 +1901,7 @@
   });
 
   function markWorn(id) {
+    if (!can('write')) { toast('当前身份只能看，不能记穿着'); return; }
     api('/api/items/' + encodeURIComponent(id) + '/wear', {
       method: 'POST', body: JSON.stringify({ laundry: true })
     }).then(function () {
@@ -1609,6 +1912,7 @@
   }
 
   function removeGarment(id) {
+    if (!can('remove')) { toast('当前身份不能删东西'); return; }
     var g = state.wb.items.filter(function (x) { return x.id === id; })[0];
     if (!window.confirm('确定删除「' + (g ? g.name : '这件衣服') + '」吗？')) return;
     api('/api/items/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () {
@@ -1620,6 +1924,461 @@
   }
 
   $('outfit-reroll').addEventListener('click', function () { suggestOutfit(); });
+
+  /* ---------- 身份与门禁 ---------- */
+
+  function applyAuth(data) {
+    state.auth = {
+      me: data.me || null,
+      members: data.members || [],
+      caps: data.caps || {},
+      roles: data.roles || [],
+      needSetup: !!data.needSetup,
+      bootstrap: !!data.bootstrap
+    };
+  }
+
+  // 权限收口：只负责「不显示」，真正的拦截在后端
+  function applyPermissions() {
+    var body = document.body;
+    body.classList.toggle('no-write', !can('write'));
+    body.classList.toggle('no-remove', !can('remove'));
+    body.classList.toggle('no-price', !can('seePrice'));
+
+    var addTab = document.querySelector('.tab[data-tab="add"]');
+    if (addTab) addTab.hidden = !can('write');
+
+    var priceField = $('f-price-field');
+    if (priceField) priceField.hidden = !can('seePrice');
+
+    docStatsBar();
+
+    if (!can('write') && state.tab === 'add') setTab('search');
+    if (!can('stats') && state.tab === 'stats') setTab(state.prevTab || 'search');
+    if (!can('members')) $('mm').hidden = true;
+  }
+
+  function docStatsBar() {
+    var wrap = $('stat-value-wrap');
+    if (wrap) wrap.hidden = !can('seePrice');
+    var bar = $('stats-bar');
+    if (!bar) return;
+    bar.classList.toggle('four', can('seePrice'));
+    bar.classList.toggle('is-entry', can('stats'));
+    bar.setAttribute('tabindex', can('stats') ? '0' : '-1');
+  }
+
+  function enterApp() {
+    $('gate').hidden = true;
+    state.wb.stale = true;
+    applyPermissions();
+    renderWho();
+    renderFormSelects();
+    // 换人进来后，录入默认归属新的当前身份
+    if ($('f-owner')) $('f-owner').value = '';
+    renderOwnerSelect();
+    renderRoleOptions();
+    return Promise.all([loadLocations(), doSearch(), loadStats()]).catch(function (err) {
+      console.error(err);
+      toast('加载失败：' + err.message);
+    });
+  }
+
+  function bootAuth() {
+    return api('/api/auth/me').then(function (data) {
+      applyAuth(data);
+      if (data.needSetup) { paintSetupGate(); return null; }
+      if (!data.me) { paintMemberGate(); return null; }
+      return enterApp();
+    }).catch(function (err) {
+      $('gate').hidden = false;
+      $('gate-card').innerHTML =
+        '<h2 class="gate-title">打不开家门</h2>' +
+        '<p class="gate-sub">' + esc(err.message) + '</p>' +
+        '<div class="gate-actions">' +
+          '<button type="button" class="primary" id="gate-retry">再试一次</button>' +
+        '</div>';
+      var btn = $('gate-retry');
+      if (btn) btn.addEventListener('click', function () { bootAuth(); });
+    });
+  }
+
+  function paintSetupGate() {
+    $('gate').hidden = false;
+    $('gate-card').innerHTML =
+      '<h2 class="gate-title">先建一个管理员</h2>' +
+      '<p class="gate-sub">这东西只放在你家里，不联网。名字和密码只有你们自己知道。</p>' +
+      '<form class="gate-form" id="setup-form">' +
+        '<label class="field"><span class="label-text">你的名字</span>' +
+          '<input id="setup-name" placeholder="比如：爸爸" autocomplete="off" /></label>' +
+        '<label class="field"><span class="label-text">设个密码（至少 6 位）</span>' +
+          '<input id="setup-pass" type="password" placeholder="≥6 位" autocomplete="new-password" /></label>' +
+        '<div class="gate-actions">' +
+          '<button type="submit" class="primary" id="setup-submit">建好，开始用</button>' +
+        '</div>' +
+      '</form>' +
+      '<button type="button" class="gate-skip" id="gate-skip">先跳过，直接开始用</button>' +
+      '<p class="gate-hint">以后可以在右上角「身份」里添加家人、改密码。</p>';
+
+    $('setup-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var name = $('setup-name').value.trim();
+      var pass = $('setup-pass').value;
+      if (!name) { toast('先写个名字吧'); return; }
+      if (pass.length < 6) { toast('密码至少 6 位'); return; }
+      var btn = $('setup-submit');
+      btn.disabled = true;
+      api('/api/auth/setup', {
+        method: 'POST', body: JSON.stringify({ name: name, password: pass })
+      }).then(function (data) {
+        return api('/api/auth/me').then(function (full) {
+          applyAuth(full);
+          if (data && data.recoverCode) {
+            paintRecoverCode(data.recoverCode, enterApp);
+          } else {
+            toast('管理员建好了');
+            enterApp();
+          }
+        });
+      }).catch(function (err) {
+        btn.disabled = false;
+        toast(err.message);
+      });
+    });
+
+    $('gate-skip').addEventListener('click', function () { enterApp(); });
+  }
+
+  // 恢复码只出现一次，必须让用户看见并确认抄下
+  function paintRecoverCode(code, done) {
+    $('gate').hidden = false;
+    $('gate-card').innerHTML =
+      '<h2 class="gate-title">抄下这串恢复码</h2>' +
+      '<p class="gate-sub">忘记密码时，它是唯一能把管理员找回来的东西。' +
+        '抄在路由器背面，或者抽屉里的纸条上。</p>' +
+      '<div class="code-box">' + esc(code) + '</div>' +
+      '<div class="gate-actions code-actions">' +
+        '<button type="button" class="primary" id="code-ok">我抄好了</button>' +
+      '</div>' +
+      '<p class="gate-hint">这串码只显示这一次，关掉就看不到了。</p>';
+    $('code-ok').addEventListener('click', function () {
+      $('gate').hidden = true;
+      if (done) done();
+    });
+  }
+
+  function paintMemberGate() {
+    $('gate').hidden = false;
+    var members = state.auth.members || [];
+    $('gate-card').innerHTML =
+      '<h2 class="gate-title">你是谁？</h2>' +
+      '<p class="gate-sub">点自己的名字进来。能不能看金额、能不能删东西，都按身份来。</p>' +
+      '<div class="member-grid">' +
+        members.map(function (m) {
+          return '<button type="button" class="member-btn" data-mid="' + esc(m.id) + '">' +
+            '<span class="mem-avatar">' + esc(String(m.name || '?').slice(0, 1)) + '</span>' +
+            '<span class="member-name">' + esc(m.name) + '</span>' +
+            '<span class="role-tag">' + esc(roleName(m.role)) + '</span>' +
+          '</button>';
+        }).join('') +
+      '</div>' +
+      '<p class="gate-hint">没看到自己？让管理员在「成员管理」里加一个。</p>';
+  }
+
+  $('gate-card').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('[data-mid]') : null;
+    if (!btn) return;
+    var m = (state.auth.members || []).filter(function (x) { return x.id === btn.dataset.mid; })[0];
+    if (!m) return;
+    if (m.hasPassword) paintPasswordGate(m);
+    else loginMember(m.id, null);
+  });
+
+  function paintPasswordGate(m) {
+    $('gate').hidden = false;
+    $('gate-card').innerHTML =
+      '<button type="button" class="mini gate-back" id="pw-back">← 换个人</button>' +
+      '<h2 class="gate-title">' + esc(m.name) + ' 的密码</h2>' +
+      '<p class="gate-sub">输密码才能进。</p>' +
+      '<form class="gate-form" id="pw-form">' +
+        '<label class="field"><span class="label-text">密码</span>' +
+          '<input id="pw-input" type="password" autocomplete="current-password" /></label>' +
+        '<div class="gate-actions"><button type="submit" class="primary">进来</button></div>' +
+        '<p class="gate-err" id="pw-err" hidden></p>' +
+      '</form>';
+    $('pw-back').addEventListener('click', function () { paintMemberGate(); });
+    $('pw-input').focus();
+    $('pw-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      loginMember(m.id, $('pw-input').value, $('pw-err'));
+    });
+  }
+
+  function loginMember(id, password, errBox) {
+    return api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ memberId: id, password: password || undefined })
+    }).then(function (data) {
+      // 登录接口只回 me + caps，成员名单要再取一次
+      return api('/api/auth/me').then(function (full) {
+        applyAuth(full);
+        toast('欢迎，' + (data.me ? data.me.name : ''));
+        return enterApp();
+      });
+    }).catch(function (err) {
+      if (errBox) {
+        errBox.hidden = false;
+        errBox.textContent = err.message;
+      }
+      toast(err.message);
+    });
+  }
+
+  function renderWho() {
+    var btn = $('who-btn');
+    if (!btn) return;
+    var me = state.auth.me;
+    if (!me) { btn.hidden = true; return; }
+    btn.hidden = false;
+    btn.textContent = me.name;
+    btn.title = '当前身份：' + me.name + '（' + roleName(me.role) + '）';
+  }
+
+  function paintWhoPanel() {
+    var panel = $('who-panel');
+    var me = state.auth.me;
+    if (!me) return;
+    var others = (state.auth.members || []).filter(function (m) { return m.id !== me.id; });
+    var html = '<div class="who-head">当前身份<br><b>' + esc(me.name) + '</b> ' +
+      '<span class="role-tag">' + esc(roleName(me.role)) + '</span></div>';
+    if (others.length) {
+      html += '<p class="who-label">切换成员</p>' + others.map(function (m) {
+        return '<button type="button" class="who-item" data-switch="' + esc(m.id) + '">' +
+          '<span>' + esc(m.name) + '</span>' +
+          '<span class="role-tag">' + esc(roleName(m.role)) + '</span></button>';
+      }).join('') + '<div class="who-sep"></div>';
+    }
+    if (can('members')) {
+      html += '<button type="button" class="who-item" data-who="manage">成员管理</button>';
+    }
+    html += '<button type="button" class="who-item danger" data-who="logout">退出登录</button>';
+    panel.innerHTML = html;
+    panel.hidden = false;
+  }
+
+  $('who-btn').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var panel = $('who-panel');
+    if (!panel.hidden) { panel.hidden = true; return; }
+    paintWhoPanel();
+  });
+
+  $('who-panel').addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('[data-switch],[data-who]') : null;
+    if (!t) return;
+    if (t.dataset.switch) {
+      var m = (state.auth.members || []).filter(function (x) { return x.id === t.dataset.switch; })[0];
+      $('who-panel').hidden = true;
+      if (!m) return;
+      if (m.hasPassword) paintPasswordGate(m);
+      else loginMember(m.id, null);
+      return;
+    }
+    var act = t.dataset.who;
+    $('who-panel').hidden = true;
+    if (act === 'logout') logout();
+    if (act === 'manage') openMembers();
+  });
+
+  document.addEventListener('click', function (e) {
+    var panel = $('who-panel');
+    if (panel.hidden) return;
+    if (e.target.closest && e.target.closest('#who-panel')) return;
+    if (e.target.closest && e.target.closest('#who-btn')) return;
+    panel.hidden = true;
+  });
+
+  function logout() {
+    api('/api/auth/logout', { method: 'POST' }).then(function () {
+      return api('/api/auth/me').then(function (data) {
+        applyAuth(data);
+        state.tab = 'search';
+        setTab('search');
+        $('who-btn').hidden = true;
+        if (data.needSetup) paintSetupGate();
+        else paintMemberGate();
+      });
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  /* ---------- 成员管理（仅管理员） ---------- */
+
+  function renderRoleOptions() {
+    var sel = $('mm-role');
+    if (!sel) return;
+    sel.innerHTML = (state.auth.roles || []).map(function (r) {
+      return '<option value="' + esc(r.k) + '">' + esc(r.n) + '</option>';
+    }).join('');
+    // 加人默认给「成员」，管理员要显式选
+    sel.value = 'member';
+  }
+
+  function openMembers() {
+    if (!can('members')) return;
+    renderRoleOptions();
+    $('mm').hidden = false;
+    loadMembers();
+  }
+
+  function refreshAuth() {
+    return api('/api/auth/me').then(function (data) {
+      applyAuth(data);
+      if (!data.me) {
+        $('mm').hidden = true;
+        paintMemberGate();
+        return;
+      }
+      applyPermissions();
+      renderWho();
+      renderRoleOptions();
+      renderOwnerSelect();
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  // 成员一改，自己的 role / 会话版本可能就变了：先刷新身份，再重画列表
+  function afterMemberChange() {
+    return refreshAuth().then(function () {
+      if (can('members')) paintMemberRows();
+    });
+  }
+
+  function loadMembers() {
+    return api('/api/members').then(function (data) {
+      state.auth.members = data.members || [];
+      if (state.auth.me) {
+        var mine = state.auth.members.filter(function (m) { return m.id === state.auth.me.id; })[0];
+        if (mine) { state.auth.me.name = mine.name; state.auth.me.role = mine.role; }
+      }
+      paintMemberRows();
+      renderWho();
+      renderOwnerSelect();
+      // 衣柜的归属 chip 与卡片上的名字都依赖成员名单
+      if (state.wb.loaded) { renderChips(); renderGarments(); }
+      return data.members;
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  function paintMemberRows() {
+    var me = state.auth.me;
+    var roles = state.auth.roles || [];
+    var html = (state.auth.members || []).map(function (m) {
+      var opts = roles.map(function (r) {
+        return '<option value="' + esc(r.k) + '"' + (r.k === m.role ? ' selected' : '') + '>' +
+          esc(r.n) + '</option>';
+      }).join('');
+      var self = me && m.id === me.id;
+      return '<div class="mm-row" data-mid="' + esc(m.id) + '">' +
+        '<div class="mm-line">' +
+          '<input class="mm-name" value="' + esc(m.name) + '" aria-label="成员名字" />' +
+          '<select class="mm-role-sel" aria-label="成员角色">' + opts + '</select>' +
+        '</div>' +
+        '<div class="mm-line mm-actions">' +
+          '<button type="button" class="mini" data-mact="save">保存</button>' +
+          '<button type="button" class="mini" data-mact="pass">设密码</button>' +
+          (self ? '' : '<button type="button" class="mini danger" data-mact="del">删除</button>') +
+          '<span class="role-tag">' + (m.hasPassword ? '有密码' : '免密') + '</span>' +
+        '</div>' +
+        '<div class="mm-pass-row" hidden>' +
+          '<input type="password" class="mm-pass" placeholder="新密码，至少 6 位" ' +
+            'autocomplete="new-password" />' +
+          '<button type="button" class="mini" data-mact="passgo">确定</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    $('mm-list').innerHTML = html || '<p class="hint">还没有成员</p>';
+  }
+
+  $('mm-list').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('[data-mact]') : null;
+    if (!btn) return;
+    var row = btn.closest('.mm-row');
+    if (!row) return;
+    var id = row.dataset.mid;
+    var m = (state.auth.members || []).filter(function (x) { return x.id === id; })[0];
+    if (!m) return;
+    var act = btn.dataset.mact;
+
+    if (act === 'pass') {
+      var pr = row.querySelector('.mm-pass-row');
+      pr.hidden = !pr.hidden;
+      if (!pr.hidden) pr.querySelector('.mm-pass').focus();
+      return;
+    }
+
+    if (act === 'save') {
+      var name = row.querySelector('.mm-name').value.trim();
+      var role = row.querySelector('.mm-role-sel').value;
+      if (!name) { toast('名字不能为空'); return; }
+      api('/api/members/' + encodeURIComponent(id), {
+        method: 'PUT', body: JSON.stringify({ name: name, role: role })
+      }).then(function (data) {
+        toast('已保存：' + data.member.name);
+        return afterMemberChange();
+      }).catch(function (err) { toast(err.message); });
+      return;
+    }
+
+    if (act === 'passgo') {
+      var pass = row.querySelector('.mm-pass').value;
+      if (pass.length < 6) { toast('密码至少 6 位'); return; }
+      api('/api/members/' + encodeURIComponent(id) + '/password', {
+        method: 'POST', body: JSON.stringify({ password: pass })
+      }).then(function (data) {
+        if (data.recoverCode) {
+          // 改自己的密码会立刻作废旧会话，等用户抄完码再刷新身份
+          paintRecoverCode(data.recoverCode, afterMemberChange);
+        } else {
+          toast('密码已更新');
+          afterMemberChange();
+        }
+      }).catch(function (err) { toast(err.message); });
+      return;
+    }
+
+    if (act === 'del') {
+      if (!window.confirm('删除成员「' + m.name + '」？\n他记的东西不会删，归属会变成共用')) return;
+      api('/api/members/' + encodeURIComponent(id), { method: 'DELETE' }).then(function () {
+        toast('已删除：' + m.name);
+        return afterMemberChange();
+      }).catch(function (err) { toast(err.message); });
+    }
+  });
+
+  $('mm-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = $('mm-name').value.trim();
+    var role = $('mm-role').value;
+    var pass = $('mm-pass').value;
+    if (!name) { toast('先写个名字'); return; }
+    if (pass && pass.length < 6) { toast('密码至少 6 位，或者不填'); return; }
+    var body = { name: name, role: role };
+    if (pass) body.password = pass;
+    api('/api/members', { method: 'POST', body: JSON.stringify(body) }).then(function (data) {
+      $('mm-name').value = '';
+      $('mm-pass').value = '';
+      toast('已添加：' + data.member.name);
+      if (data.recoverCode) {
+        paintRecoverCode(data.recoverCode, afterMemberChange);
+      } else {
+        afterMemberChange();
+      }
+    }).catch(function (err) { toast(err.message); });
+  });
+
+  $('mm-close').addEventListener('click', function () { $('mm').hidden = true; });
+  $('mm').addEventListener('click', function (e) {
+    if (e.target === this) $('mm').hidden = true;
+  });
 
   /* ---------- 离线缓存 ---------- */
 
@@ -1640,8 +2399,6 @@
     if (box) box.textContent = '前端资源 ' + APP_VERSION;
   })();
 
-  Promise.all([loadLocations(), doSearch()]).catch(function (err) {
-    console.error(err);
-    toast('加载失败：' + err.message);
-  });
+  // 先确定「我是谁」，再加载任何数据；没身份就停在门禁层
+  bootAuth();
 })();

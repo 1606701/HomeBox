@@ -6,9 +6,10 @@
 //   HOST=0.0.0.0 node server.js       部署到香橙派，局域网内可访问
 //   PORT=3000 node server.js          换个端口
 //
-// v2 P1：数据层从「单个 data/db.json 全量重写」换成 SQLite（Node 内置 node:sqlite）。
-// 对外 API 的路径、方法、入参、返回结构、错误文案全部保持不变 —— 前端一个字节没改。
-// 这个文件的职责只剩「HTTP 创建 + 路由分派 + 启动」，数据访问全在 lib/repo/ 里。
+// v2 P1：数据层换成 SQLite（Node 内置 node:sqlite），对外 API 行为不变。
+// v2 P2：加上成员身份（四档角色）与物品金额/价值统计。金额在服务端按角色裁剪，
+//        不做「前端隐藏」——前端隐藏挡不住直接调接口。
+// 这个文件的职责仍是「HTTP 创建 + 路由分派 + 启动」，数据访问全在 lib/repo/ 里。
 
 const httpMod = require('http');
 const path = require('path');
@@ -18,8 +19,12 @@ const web = require('./lib/http');
 const photos = require('./lib/photos');
 const boot = require('./lib/boot');
 const db = require('./lib/db');
+const auth = require('./lib/auth');
+const roles = require('./lib/roles');
 const locations = require('./lib/repo/locations');
 const items = require('./lib/repo/items');
+const members = require('./lib/repo/members');
+const stats = require('./lib/repo/stats');
 const util = require('./lib/util');
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -38,6 +43,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 let runtime;
 try {
   runtime = boot.boot({ dataDir: DATA_DIR, publicDir: PUBLIC_DIR });
+  auth.configure({ dataDir: DATA_DIR });
 } catch (err) {
   // 数据不可信就绝不出服务：宁可不启动，也不要让用户对着示例数据点一下
   // 把真实数据覆盖掉（这是旧版 readDB() 静默 seed 留下的最危险的那条路）。
@@ -64,6 +70,48 @@ if (runtime.backfilled) {
   console.log('[info] 已为 ' + runtime.backfilled + ' 个位置补上地图坐标');
 }
 
+/* ---------- 身份与权限 ---------- */
+
+/**
+ * 解析当前请求的身份。没有任何成员时是「首次使用」状态，按管理员对待，
+ * 既能建第一个管理员，也不会把老用户挡在门外。
+ * @param {import('http').IncomingMessage} req 请求
+ * @returns {object} 身份上下文
+ */
+function ctxOf(req) {
+  return auth.context(req, { members, roles });
+}
+
+/**
+ * 能力校验，不通过直接回 403 并返回 false。
+ * @param {import('http').ServerResponse} res 响应
+ * @param {object} ctx 身份上下文
+ * @param {string} cap 能力名
+ * @returns {boolean} 是否放行
+ */
+function guard(res, ctx, cap) {
+  if (roles.can(ctx.role, cap)) return true;
+  const label = (roles.ROLES.find((r) => r.k === ctx.role) || { n: '访客' }).n;
+  web.sendJSON(res, 403, { ok: false, error: '当前身份（' + label + '）没有这个权限' });
+  return false;
+}
+
+/**
+ * 把元为单位的金额转成整数分。前端可以传 price（元）或 priceCents（分）。
+ * @param {object} body 请求体
+ * @returns {number|null|undefined} undefined 表示「没传，不要改」
+ */
+function priceArg(body) {
+  if (body.priceCents !== undefined) return body.priceCents;
+  if (body.price !== undefined) {
+    if (body.price === null || body.price === '') return null;
+    const n = Number(body.price);
+    // 四舍五入到分：19.99 元 → 1999 分，避免浮点漂移
+    return Number.isFinite(n) ? Math.round(n * 100) : null;
+  }
+  return undefined;
+}
+
 /* ---------- API ---------- */
 
 /**
@@ -86,13 +134,128 @@ async function handleApi(req, res, pathname, query) {
     });
   }
 
+  const ctx = ctxOf(req);
+  // 会话临到期时静默续一次（无状态 Cookie 不需要写库）
+  if (ctx.renew && ctx.member) auth.setSessionCookie(res, ctx.member, req);
+
+  /* ---------- 身份 ---------- */
+
+  if (pathname === '/api/auth/me' && req.method === 'GET') {
+    if (!ctx.bootstrap && ctx.member) members.touch(ctx.member.id);
+    return web.sendJSON(res, 200, {
+      ok: true,
+      needSetup: ctx.needSetup,
+      // 成员名单是「点头像登录」的前提，所以未登录也要能看到名字与角色。
+      // 这里只给最小信息，绝不含密码哈希。
+      members: members.list(),
+      me: ctx.member ? {
+        id: ctx.member.id, name: ctx.member.name, role: ctx.role
+      } : null,
+      caps: ctx.caps,
+      roles: roles.ROLES,
+      bootstrap: ctx.bootstrap
+    });
+  }
+
+  if (pathname === '/api/auth/setup' && req.method === 'POST') {
+    if (members.count() > 0) {
+      return web.sendJSON(res, 409, { ok: false, error: '已经初始化过了' });
+    }
+    const body = await web.readBody(req);
+    const out = members.create({
+      name: body.name, role: 'admin', password: body.password
+    });
+    if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+    auth.setSessionCookie(res, { id: out.member.id, role: out.member.role, passVer: 0 }, req);
+    return web.sendJSON(res, 201, {
+      ok: true, member: out.member, recoverCode: out.recoverCode || null
+    });
+  }
+
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const body = await web.readBody(req);
+    const id = String(body.memberId || body.id || '');
+    const row = db.prepare('SELECT * FROM members WHERE id = ?').get(id);
+    if (!row) return web.sendJSON(res, 404, { ok: false, error: '没有这个人' });
+
+    if (row.pass_hash) {
+      // 设过密码的成员必须验密码
+      const checked = members.checkPassword(id, body.password);
+      if (!checked.ok) return web.sendJSON(res, 401, { ok: false, error: '密码不对' });
+    }
+    const member = members.getAuth(id);
+    members.touch(id);
+    auth.setSessionCookie(res, member, req);
+    return web.sendJSON(res, 200, {
+      ok: true, me: { id: member.id, name: member.name, role: member.role },
+      caps: roles.capsOf(member.role)
+    });
+  }
+
+  if (pathname === '/api/auth/logout' && req.method === 'POST') {
+    auth.clearSessionCookie(res);
+    return web.sendJSON(res, 200, { ok: true });
+  }
+
+  /* ---------- 成员管理 ---------- */
+
+  if (pathname === '/api/members') {
+    if (!guard(res, ctx, 'members')) return;
+    if (req.method === 'GET') return web.sendJSON(res, 200, { ok: true, members: members.list() });
+    if (req.method === 'POST') {
+      const body = await web.readBody(req);
+      const out = members.create({ name: body.name, role: body.role, password: body.password });
+      if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+      return web.sendJSON(res, 201, { ok: true, member: out.member, recoverCode: out.recoverCode || null });
+    }
+  }
+
+  const memberMatch = pathname.match(/^\/api\/members\/([^/]+)(\/password)?$/);
+  if (memberMatch) {
+    if (!guard(res, ctx, 'members')) return;
+    const id = decodeURIComponent(memberMatch[1]);
+    const isPassword = !!memberMatch[2];
+
+    if (isPassword && req.method === 'POST') {
+      const body = await web.readBody(req);
+      const out = members.setPassword(id, body.password);
+      if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+      return web.sendJSON(res, 200, {
+        ok: true, member: out.member, recoverCode: out.recoverCode || null
+      });
+    }
+    if (req.method === 'PUT') {
+      const body = await web.readBody(req);
+      const out = members.update(id, { name: body.name, role: body.role });
+      if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+      return web.sendJSON(res, 200, { ok: true, member: out.member });
+    }
+    if (req.method === 'DELETE') {
+      const out = members.remove(id);
+      if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+      return web.sendJSON(res, 200, { ok: true });
+    }
+  }
+
+  /* ---------- 价值统计 ---------- */
+
+  if (pathname === '/api/stats/value' && req.method === 'GET') {
+    if (!guard(res, ctx, 'stats')) return;
+    const by = String(query.get('by') || 'loc');
+    return web.sendJSON(res, 200, Object.assign({ ok: true }, stats.value({ by })));
+  }
+
+  /* ---------- 位置 ---------- */
+
   if (pathname === '/api/locations') {
     if (req.method === 'GET') {
+      const tree = roles.forTree(stats.decorateTree(locations.buildTree()), ctx.role);
       return web.sendJSON(res, 200, {
-        ok: true, tree: locations.buildTree(), settings: locations.loadSettings()
+        ok: true, tree, settings: locations.loadSettings()
       });
     }
     if (req.method === 'POST') {
+      if (!guard(res, ctx, 'write')) return;
       const body = await web.readBody(req);
       const name = String(body.name || '').trim();
       if (!name) return web.sendJSON(res, 400, { ok: false, error: '位置名称不能为空' });
@@ -116,6 +279,7 @@ async function handleApi(req, res, pathname, query) {
     if (!cur) return web.sendJSON(res, 404, { ok: false, error: '位置不存在' });
 
     if (req.method === 'PUT') {
+      if (!guard(res, ctx, 'write')) return;
       const body = await web.readBody(req);
       const patch = {};
       if (body.name !== undefined) patch.name = String(body.name).trim() || cur.name;
@@ -142,6 +306,12 @@ async function handleApi(req, res, pathname, query) {
     }
 
     if (req.method === 'DELETE') {
+      if (!guard(res, ctx, 'remove')) return;
+      // P2：禁止删除「家」这一层。调一次就能抹掉整个户型和所有归位信息，
+      // 代价远大于收益，而且前端本来也点不到它（它没有地图坐标）。
+      if (cur.kind === 'home') {
+        return web.sendJSON(res, 400, { ok: false, error: '「家」这一层不能删除' });
+      }
       // 连同子孙位置一起删除，其中的物品保留下来，只是标记为未归档
       // （items.loc_id 由外键 ON DELETE SET NULL 自动置空）
       const removed = db.tx(() => locations.removeMany(locations.collectSubtree(id)));
@@ -151,6 +321,7 @@ async function handleApi(req, res, pathname, query) {
 
   // 户型设置：家的真实宽度（米），只用于把抽象坐标换算成面积显示
   if (pathname === '/api/settings' && req.method === 'PUT') {
+    if (!guard(res, ctx, 'settings')) return;
     const body = await web.readBody(req);
     const m = Number(body.planWidthM);
     if (!(m > 0) || m > 200) {
@@ -159,12 +330,20 @@ async function handleApi(req, res, pathname, query) {
     return web.sendJSON(res, 200, { ok: true, settings: locations.savePlanWidthM(m) });
   }
 
+  /* ---------- 物品 ---------- */
+
   if (pathname === '/api/items') {
     if (req.method === 'GET') {
       const q = String(query.get('q') || '');
-      return web.sendJSON(res, 200, { ok: true, items: items.list({ q }) });
+      const opts = { q };
+      if (query.has('ownerId')) opts.ownerId = String(query.get('ownerId'));
+      if (query.has('category')) opts.category = String(query.get('category'));
+      if (query.has('state')) opts.state = String(query.get('state'));
+      const list = items.list(opts).map((i) => roles.forItem(i, ctx.role));
+      return web.sendJSON(res, 200, { ok: true, items: list });
     }
     if (req.method === 'POST') {
+      if (!guard(res, ctx, 'write')) return;
       const body = await web.readBody(req);
       const name = String(body.name || '').trim();
       if (!name) return web.sendJSON(res, 400, { ok: false, error: '物品名称不能为空' });
@@ -174,9 +353,15 @@ async function handleApi(req, res, pathname, query) {
         note: body.note,
         qty: body.qty,
         tags: body.tags,
-        wear: body.wear
+        wear: body.wear,
+        category: body.category,
+        priceCents: priceArg(body),
+        buyDate: body.buyDate,
+        // 没指定归属就记在当前登录人头上（首次使用状态下没有真实成员，留空）
+        ownerId: body.ownerId !== undefined ? body.ownerId
+          : (ctx.bootstrap ? null : ctx.member.id)
       });
-      return web.sendJSON(res, 201, { ok: true, item });
+      return web.sendJSON(res, 201, { ok: true, item: roles.forItem(item, ctx.role) });
     }
   }
 
@@ -188,6 +373,7 @@ async function handleApi(req, res, pathname, query) {
     const id = decodeURIComponent(photoMatch[1]);
     const item = items.get(id);
     if (!item) return web.sendJSON(res, 404, { ok: false, error: '物品不存在' });
+    if (!guard(res, ctx, 'write')) return;
 
     if (req.method === 'POST') {
       const body = await web.readBody(req, web.MAX_PHOTO_BODY);
@@ -201,14 +387,16 @@ async function handleApi(req, res, pathname, query) {
       const oldFile = item.photo || null;
       const fresh = items.setPhoto(id, saved.file);
       if (oldFile && oldFile !== saved.file) photos.deletePhotoFile(oldFile);
-      return web.sendJSON(res, 200, { ok: true, item: items.withPath(fresh), photo: saved });
+      return web.sendJSON(res, 200, {
+        ok: true, item: roles.forItem(items.withPath(fresh), ctx.role), photo: saved
+      });
     }
 
     if (req.method === 'DELETE') {
       const oldFile = item.photo || null;
       const fresh = items.clearPhoto(id);
       photos.deletePhotoFile(oldFile);
-      return web.sendJSON(res, 200, { ok: true, item: items.withPath(fresh) });
+      return web.sendJSON(res, 200, { ok: true, item: roles.forItem(items.withPath(fresh), ctx.role) });
     }
   }
 
@@ -217,6 +405,7 @@ async function handleApi(req, res, pathname, query) {
   // 记录「今天穿了」：累计次数、更新最近穿着日期，穿过的默认转为待洗
   const wearLog = pathname.match(/^\/api\/items\/(.+)\/wear$/);
   if (wearLog && req.method === 'POST') {
+    if (!guard(res, ctx, 'write')) return;
     const id = decodeURIComponent(wearLog[1]);
     const cur = items.get(id);
     if (!cur) return web.sendJSON(res, 404, { ok: false, error: '找不到这件东西' });
@@ -227,21 +416,23 @@ async function handleApi(req, res, pathname, query) {
       return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
     }
     return web.sendJSON(res, 200, {
-      ok: true, item: out.item, restored: out.restored
+      ok: true, item: roles.forItem(out.item, ctx.role), restored: out.restored
     });
   }
 
   if (pathname === '/api/wardrobe' && req.method === 'GET') {
-    const list = items.listWear().map(items.withIdleDays);
+    const list = items.listWear().map(items.withIdleDays)
+      .map((i) => roles.forItem(i, ctx.role));
 
     // facets：给前端的筛选 chips 提供每项的真实数量
-    const facets = { types: {}, seasons: {}, colors: {}, status: {} };
+    const facets = { types: {}, seasons: {}, colors: {}, status: {}, owners: {} };
     const bump = (m, k) => { m[k] = (m[k] || 0) + 1; };
     list.forEach((i) => {
       bump(facets.types, i.wear.type);
       (i.wear.seasons || []).forEach((s) => bump(facets.seasons, s));
       (i.wear.colors || []).forEach((c) => bump(facets.colors, c));
       bump(facets.status, i.wear.status);
+      bump(facets.owners, i.ownerId || '');
     });
 
     const month = new Date().getMonth() + 1;
@@ -255,7 +446,9 @@ async function handleApi(req, res, pathname, query) {
     const thisSeason = util.seasonOfMonth(new Date().getMonth() + 1);
     const season = util.validOf(util.WEAR_SEASONS, query.get('season'), thisSeason);
     // 只从「可穿」且适合当季的里面挑
+    const owner = query.get('ownerId');
     const pool = items.listWear().filter((i) => i.wear.status === 'ready'
+      && (!owner || i.ownerId === owner)
       && (!i.wear.seasons.length || i.wear.seasons.indexOf(season) !== -1));
 
     // 少穿的优先：随机取前 60%，长期压箱底的衣服才有机会被翻出来
@@ -277,15 +470,22 @@ async function handleApi(req, res, pathname, query) {
       accessory: pick(['accessory'])
     };
     const missing = Object.keys(outfit).filter((k) => !outfit[k] && k !== 'accessory');
+    const strip = (x) => (x ? roles.forItem(x, ctx.role) : null);
 
     return web.sendJSON(res, 200, {
-      ok: true, season, poolSize: pool.length, outfit, missing,
+      ok: true, season, poolSize: pool.length,
+      outfit: {
+        top: strip(outfit.top), bottom: strip(outfit.bottom), dress: strip(outfit.dress),
+        outer: strip(outfit.outer), shoes: strip(outfit.shoes), accessory: strip(outfit.accessory)
+      },
+      missing,
       dict: { types: util.WEAR_TYPES, status: util.WEAR_STATUS }
     });
   }
 
   // 已有数据库的补数据入口：往用户真实的衣柜结构里塞一批示例衣物
   if (pathname === '/api/wardrobe/demo' && req.method === 'POST') {
+    if (!guard(res, ctx, 'write')) return;
     const out = items.importDemoWear();
     if (out.error) {
       return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
@@ -300,12 +500,17 @@ async function handleApi(req, res, pathname, query) {
     if (!cur) return web.sendJSON(res, 404, { ok: false, error: '物品不存在' });
 
     if (req.method === 'PUT') {
+      if (!guard(res, ctx, 'write')) return;
       const body = await web.readBody(req);
-      const item = items.update(id, body);
-      return web.sendJSON(res, 200, { ok: true, item });
+      const patch = Object.assign({}, body);
+      const cents = priceArg(body);
+      if (cents !== undefined) patch.priceCents = cents;
+      const item = items.update(id, patch);
+      return web.sendJSON(res, 200, { ok: true, item: roles.forItem(item, ctx.role) });
     }
 
     if (req.method === 'DELETE') {
+      if (!guard(res, ctx, 'remove')) return;
       const gone = items.remove(id);
       // 东西删了，它的照片也就没用了
       if (gone && gone.photo) photos.deletePhotoFile(gone.photo);
@@ -361,5 +566,8 @@ server.listen(PORT, HOST, () => {
   console.log('  数据文件： ' + runtime.dbFile);
   console.log('  运行环境： Node ' + runtime.info.node.replace(/^v/, '') +
     ' · SQLite ' + runtime.info.sqlite + ' · schema v' + runtime.info.schemaVersion);
+  if (members.count() === 0) {
+    console.log('  首次使用：打开页面先创建管理员（也可以先不建，本机全权限）');
+  }
   console.log('');
 });

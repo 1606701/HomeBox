@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=7" />
+<link rel="stylesheet" href="style.css?v=8" />
 </head>
 <body>
 
@@ -19,7 +19,10 @@
     <div class="brand">
       <span class="dot" aria-hidden="true"></span>
       <h1>HomeBox</h1>
+      <!-- 当前身份：点开可以换人、退出、进成员管理 -->
+      <button type="button" id="who-btn" class="who" hidden>本机</button>
     </div>
+    <div id="who-panel" class="who-panel" hidden></div>
     <div class="searchwrap">
       <input
         id="search"
@@ -33,7 +36,8 @@
   </header>
 
   <main class="content">
-    <div class="stats">
+    <!-- 整条可点：进「家的概览」。第四项只有能看金额的身份才出现 -->
+    <div class="stats stats-bar" id="stats-bar" role="button" tabindex="0" aria-label="查看家的价值概览">
       <div class="stat">
         <span class="stat-n" id="stat-items">0</span>
         <span class="stat-l">件东西</span>
@@ -45,6 +49,10 @@
       <div class="stat">
         <span class="stat-n" id="stat-loose">0</span>
         <span class="stat-l">还没归位</span>
+      </div>
+      <div class="stat" id="stat-value-wrap" hidden>
+        <span class="stat-n" id="stat-value">—</span>
+        <span class="stat-l">已记价金额</span>
       </div>
     </div>
 
@@ -193,6 +201,10 @@
       <div class="card filters">
         <p class="chart-title">按条件找</p>
         <div class="chip-row">
+          <span class="chip-k">归属</span>
+          <span class="chip-set" id="chip-owner"></span>
+        </div>
+        <div class="chip-row">
           <span class="chip-k">类别</span>
           <span class="chip-set" id="chip-type"></span>
         </div>
@@ -324,6 +336,40 @@
           </label>
         </div>
 
+        <!-- 金额、归属、日期都不挡主路径：默认收起，30 秒记一件仍然成立 -->
+        <details class="morebox" id="f-more">
+          <summary>更多信息（选填）</summary>
+          <div class="morebox-body">
+            <label class="field">
+              <span class="label-text">归属人</span>
+              <select id="f-owner"></select>
+            </label>
+
+            <div class="field" id="f-price-field">
+              <label class="label-text" for="f-price">多少钱</label>
+              <input id="f-price" type="number" min="0" step="0.01" inputmode="decimal"
+                     placeholder="选填，比如 199.9" />
+              <p class="field-hint">不填也能用，只是不计入金额统计</p>
+            </div>
+
+            <label class="field">
+              <span class="label-text">什么时候买的</span>
+              <input id="f-buydate" type="date" />
+            </label>
+
+            <div class="row">
+              <label class="field half">
+                <span class="label-text">类目</span>
+                <select id="f-category"></select>
+              </label>
+              <label class="field half">
+                <span class="label-text">状态</span>
+                <select id="f-state"></select>
+              </label>
+            </div>
+          </div>
+        </details>
+
         <div class="field">
           <span class="label-text">照片<span class="label-opt">选填，找的时候一眼认出它</span></span>
           <div class="photo-row">
@@ -350,6 +396,34 @@
         </div>
       </form>
     </section>
+
+    <!-- 家的概览：不占一级 tab，从顶部统计条进入 -->
+    <section id="view-stats" class="view" aria-label="价值概览">
+      <div class="sv-head">
+        <button type="button" id="stats-back" class="mini">← 返回</button>
+        <span class="sv-title">家的概览</span>
+      </div>
+
+      <div class="card sv-hero">
+        <div class="sv-big">
+          <span class="sv-n" id="sv-inuse">¥0</span>
+          <span class="sv-l">在库价值</span>
+        </div>
+        <div class="sv-big">
+          <span class="sv-n" id="sv-all">¥0</span>
+          <span class="sv-l">累计购入</span>
+        </div>
+        <p class="sv-cover" id="sv-cover"></p>
+      </div>
+
+      <div class="segmented sv-seg" id="stats-seg" role="tablist" aria-label="统计维度">
+        <button type="button" class="seg is-active" data-by="loc" role="tab">按位置</button>
+        <button type="button" class="seg" data-by="category" role="tab">按类目</button>
+        <button type="button" class="seg" data-by="owner" role="tab">按成员</button>
+      </div>
+
+      <div class="card sv-groups" id="sv-groups"></div>
+    </section>
   </main>
 
   <nav class="tabbar" role="navigation" aria-label="主导航">
@@ -368,6 +442,30 @@
   </nav>
 </div>
 
+<!-- 身份门禁：首次建管理员 / 选人登录 / 输密码，内容由 app.js 渲染 -->
+<div id="gate" class="gate" hidden>
+  <div id="gate-card" class="gate-card"></div>
+</div>
+
+<!-- 成员管理（仅管理员）：列表由 app.js 渲染 -->
+<div id="mm" class="gate" hidden>
+  <div class="gate-card mm-card">
+    <div class="mm-head">
+      <h2>家庭成员</h2>
+      <button type="button" id="mm-close" class="mini">关闭</button>
+    </div>
+    <div id="mm-list" class="mm-list"></div>
+    <form id="mm-form" class="mm-form">
+      <p class="mm-title">添加成员</p>
+      <input id="mm-name" placeholder="名字，比如：妈妈" autocomplete="off" />
+      <select id="mm-role" aria-label="成员角色"></select>
+      <input id="mm-pass" type="password" placeholder="密码（选填，≥6 位）" autocomplete="new-password" />
+      <p class="field-hint">不设密码的话，家人点头像就能进，适合老人和小孩。</p>
+      <button type="submit" class="primary">添加</button>
+    </form>
+  </div>
+</div>
+
 <div id="lightbox" class="lightbox" hidden role="dialog" aria-label="查看照片">
   <button type="button" class="lightbox-close" id="lb-close" aria-label="关闭">×</button>
   <img id="lb-img" alt="物品照片" />
@@ -375,6 +473,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

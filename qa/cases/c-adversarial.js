@@ -357,32 +357,30 @@ function register(runner, ctx) {
       expect.eq(cleanup.old.json.removed, cleanup.new.json.removed, 'removed 计数（新旧一致）');
 
       // 核心数据风险：删根节点
+      // P2 起新版直接拒绝（400）；旧版会连根拔起，这里保留对旧版的实测以便对照说明。
       const delRoot = await pair2(pair, 'DELETE', '/api/locations/l_home');
-      expect.eq(delRoot.new.status, 200, '删根节点状态码（新）');
-      expect.eq(delRoot.old.status, 200, '删根节点状态码（旧）');
-      expect.eq(delRoot.new.json.removed, delRoot.old.json.removed,
-        '连带删除的位置数（新旧一致）');
-      expect.eq(delRoot.new.json.removed, 19, '删掉根节点会连带删除全部 19 个位置');
+      expect.eq(delRoot.new.status, 400, '删根节点应被拒绝（新），实际 ' + delRoot.new.status);
+      expect.eq(delRoot.new.json.error, '「家」这一层不能删除', '删根节点的拒绝文案');
+      expect.eq(delRoot.old.status, 200, '旧版仍会执行删除（对照用）');
+      expect.eq(delRoot.old.json.removed, 19, '旧版删根节点会连带删除全部 19 个位置');
 
+      // 新版的树必须毫发无损
       const afterTree = await pair2(pair, 'GET', '/api/locations');
-      expect.eq(afterTree.new.text, afterTree.old.text, '删根后 GET /api/locations 应一致');
-      expect.eq(afterTree.new.json.tree.length, 0, '删根后树应彻底为空');
-      expect.eq(afterTree.new.json.settings.planWidthM, 12, '户型设置不应被连带清掉');
+      expect.eq(afterTree.new.json.tree.length, 1, '拒绝删根后仍应只有 1 个根');
+      const countNodes = (nodes) => nodes.reduce((n, x) => n + 1 + countNodes(x.children || []), 0);
+      expect.eq(countNodes(afterTree.new.json.tree), 19, '拒绝删根后仍有 19 个位置');
+      expect.eq(afterTree.new.json.settings.planWidthM, 12, '户型设置不受影响');
 
       const afterItems = await pair2(pair, 'GET', '/api/items');
-      expect.eq(afterItems.new.text, afterItems.old.text, '删根后 GET /api/items 应一致');
-      const orphan = afterItems.new.json.items.filter((i) => i.locId !== null);
-      expect.eq(orphan.length, 0, '所有物品的 locId 都应被置空');
-      const unarchived = afterItems.new.json.items.filter((i) => i.path !== '未归档');
-      expect.eq(unarchived.length, 0, '所有物品的 path 都应是「未归档」');
+      const orphan = afterItems.new.json.items.filter((i) => i.locId === null);
+      expect.eq(orphan.length, 0, '拒绝删根后没有任何物品变成未归档');
 
       runner.finding('F-C5',
-        '删除根节点 l_home 会把整棵树和所有物品的归位信息一起清掉（新旧一致，但杀伤力极大）',
-        'DELETE /api/locations/l_home 返回 removed=19：19 个位置全删、26 件物品全部变成「未归档」，' +
-        '户型设置保留。新旧两版响应逐字节相同，所以不是本次迁移引入的回归；' +
-        '但这是一次点击就能抹掉整个户型结构的操作，前端删除位置的入口没有对 kind=home 做二次确认。' +
-        '建议 P2 加一条「根位置不允许删除」或「删前要求输入家名」的保护。',
-        'risk');
+        '删除根节点 l_home 在 P2 已被拒绝（旧版会抹掉整个户型）',
+        '旧版 DELETE /api/locations/l_home 返回 removed=19：19 个位置全删、26 件物品全部变「未归档」。' +
+        'P2 起服务端直接返回 400「「家」这一层不能删除」，树与物品归位信息毫发无损。' +
+        '前端本来也点不到根节点（它没有地图坐标），这条保护只影响直接调接口的场景。',
+        'fixed');
     }, { repro: 'node qa/qa-p1.js --only C5' });
 
   runner.test('C6', 'box 边界：null / {} / 缺字段 / 字符串数字 / 负宽高 / 超大值 不 500，差异如实记录',
@@ -575,8 +573,11 @@ function register(runner, ctx) {
       const res = await pair2(pair, 'GET',
         '/api/items?q=' + encodeURIComponent(q));
       expect.eq(res.new.status, 200, 'q=' + JSON.stringify(q.slice(0, 12)) + ' 状态码');
-      expect.eq(res.new.text, res.old.text,
-        'q=' + JSON.stringify(q.slice(0, 12)) + ' 结果应与旧版逐字节一致');
+      // P2 起响应多了金额/归属等字段，先剥掉再比（详见 qa/lib/canon.js 的 P2_ONLY）
+      expect.eq(
+        JSON.stringify(canon.canon(res.new.json, canon.newContext())),
+        JSON.stringify(canon.canon(res.old.json, canon.newContext())),
+        'q=' + JSON.stringify(q.slice(0, 12)) + ' 结果应与旧版一致（忽略 P2 新增字段）');
     }
     const wild = await httpc.request(s.newSrv.base, 'GET', '/api/items?q=%25');
     expect.eq(wild.json.items.length, 0, 'q=% 不应匹配任何物品（说明没裸拼 LIKE）');

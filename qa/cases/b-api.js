@@ -92,20 +92,35 @@ function pathOf(prefix, ids, suffix) {
 }
 
 /**
- * 要求两边响应逐字节相同（只读接口）。
+ * 要求两边响应等价（只读接口）。
+ *
+ * P2 起响应里多了金额/归属/类目等字段，原始文本不再逐字节相同，
+ * 所以这里改成「先用 canon 剥掉 P2 新增字段，再比文本」，非 JSON（照片、静态资源）
+ * 仍然逐字节比。P2 新字段自己的一致性由 qa/qa-p2.js 覆盖。
  * @param {{old:object,new:object}} res 响应对
  * @param {string} label 用例说明
  */
 function sameBytes(res, label) {
   expect.eq(res.old.status, res.new.status, label + ' 状态码');
-  if (res.old.text !== res.new.text) {
+
+  let oldText = res.old.text;
+  let newText = res.new.text;
+  try {
+    const ctx = canon.newContext();
+    oldText = JSON.stringify(canon.canon(JSON.parse(res.old.text), ctx));
+    newText = JSON.stringify(canon.canon(JSON.parse(res.new.text), ctx));
+  } catch (err) {
+    // 不是 JSON（照片二进制、静态资源），保持逐字节比较
+  }
+
+  if (oldText !== newText) {
     let detail = '';
     try {
       detail = canon.render(canon.diff(JSON.parse(res.old.text), JSON.parse(res.new.text)));
     } catch (err) {
       detail = '  旧：' + res.old.text.slice(0, 300) + '\n  新：' + res.new.text.slice(0, 300);
     }
-    throw new Error(label + ' 响应体不是逐字节相同：\n' + detail);
+    throw new Error(label + ' 响应体不一致：\n' + detail);
   }
 }
 
