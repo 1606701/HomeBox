@@ -11,6 +11,7 @@ const path = require('path');
 const util = require('../lib/util');
 const servers = require('../lib/servers');
 const dbcheck = require('../lib/dbcheck');
+const httpc = require('../lib/httpc');
 const { expect } = require('../lib/runner');
 
 /**
@@ -586,6 +587,59 @@ function register(runner, ctx) {
         util.rmrf(dir);
       }
     }, { repro: 'node --disable-warning=ExperimentalWarning qa/qa-p1.js --only A16' });
+
+  runner.test('A17', 'defer_foreign_keys 没有泄漏到运行期：同进程迁移后外键仍然拦得住',
+    async () => {
+      // 背景：为了让「子节点排在父节点前面」的合法 v1 数据也能迁移，
+      // lib/migrate-v1.js 在迁移事务里开了 PRAGMA defer_foreign_keys = ON。
+      // 这条 PRAGMA 理论上 COMMIT 后自动复位，但「server.js 同进程先迁移再服务」是最容易泄漏的路径：
+      // 一旦真的泄漏，运行期的 ON DELETE SET NULL 会静默失效——删位置不再把物品置空，
+      // 而且不会有任何报错，属于最难发现的一类回归。所以必须有一条常驻用例守着。
+      const dir = util.makeTempDir('hb-qa-fkleak-');
+      const dataDir = path.join(dir, 'data');
+      servers.prepareDataDir(repoRoot, dataDir);
+      // 注意：这里故意不预先跑迁移脚本，让 server.js 自己在同进程里完成迁移
+      const srv = await servers.startNewServer({ repoRoot, dataDir });
+      try {
+        expect.includes(srv.stdout, '已从 data/db.json 迁移到 SQLite', '应走同进程迁移路径');
+
+        const before = await httpc.request(srv.base, 'GET', '/api/items');
+        const target = before.json.items.filter((i) => i.locId === 'l_tvdrawer')[0];
+        expect.ok(target, '前置：l_tvdrawer 里应有物品');
+
+        const del = await httpc.request(srv.base, 'DELETE', '/api/locations/l_tvdrawer');
+        expect.eq(del.status, 200, '删位置状态码');
+        expect.eq(del.json.removed, 1, '删位置条数');
+
+        const after = await httpc.request(srv.base, 'GET', '/api/items');
+        const gone = after.json.items.filter((i) => i.id === target.id)[0];
+        expect.ok(gone, '物品不应被连带删除');
+        expect.eq(gone.locId, null,
+          '外键 ON DELETE SET NULL 必须仍然生效（locId 应被置空）—— 否则说明 ' +
+          'defer_foreign_keys 泄漏到了运行期');
+        expect.eq(gone.path, '未归档', 'path 应为未归档');
+
+        // 再走一遍「建位置 → 放物品 → 删位置」，排除偶发
+        const loc = await httpc.request(srv.base, 'POST', '/api/locations',
+          { body: { name: '外键复核房间', kind: 'room' } });
+        const locId = loc.json.location.id;
+        const item = await httpc.request(srv.base, 'POST', '/api/items',
+          { body: { name: '外键复核物品', locId } });
+        expect.eq(item.json.item.locId, locId, '物品应落在新位置');
+        await httpc.request(srv.base, 'DELETE', '/api/locations/' + encodeURIComponent(locId));
+        const reread = await httpc.request(srv.base, 'GET', '/api/items');
+        const it2 = reread.json.items.filter((i) => i.id === item.json.item.id)[0];
+        expect.ok(it2, '第二个物品也应还在');
+        expect.eq(it2.locId, null, '删位置后第二个物品的 locId 也应被置空');
+
+        expect.ok(srv.stderr.indexOf('[fatal]') === -1, '不应有 [fatal]');
+        expect.ok(srv.stderr.indexOf('[api error]') === -1,
+          '不应有 [api error]：' + srv.stderr.slice(0, 300));
+      } finally {
+        await servers.stopServer(srv);
+        util.rmrf(dir);
+      }
+    }, { repro: 'node --disable-warning=ExperimentalWarning qa/qa-p1.js --only A17' });
 }
 
 module.exports = { register, readSource, clone, migrateWith };
