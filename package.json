@@ -5,10 +5,13 @@
   "description": "家里的东西在哪 · 零依赖的家庭收纳检索服务，跑在树莓派 / 香橙派上",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "migrate": "node --disable-warning=ExperimentalWarning scripts/migrate-v1.js",
+    "export": "node --disable-warning=ExperimentalWarning scripts/export.js",
+    "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke-test.js"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=22.13"
   },
   "keywords": [
     "home-inventory",

@@ -28,7 +28,7 @@
 
 ## 快速开始（先在电脑上试一下）
 
-只需要 Node 16 以上，不用装任何依赖、不用打包：
+只需要 Node 22.13 以上，不用装任何依赖、不用打包（数据库用的是 Node 自带的 `node:sqlite`）：
 
 ```bash
 git clone https://github.com/1606701/HomeBox.git
@@ -36,7 +36,11 @@ cd HomeBox
 node server.js
 ```
 
-然后打开 <http://127.0.0.1:8080>。第一次启动会自动生成 `data/db.json`，里面有一份示例数据，随便改。
+然后打开 <http://127.0.0.1:8080>。第一次启动会自动生成 `data/homebox.db`，里面有一份示例数据，随便改。
+
+> 从旧版本升级上来的话，`data/db.json` 会在启动时自动迁移进 `data/homebox.db`，
+> 原文件改名为 `db.json.migrated` 留档、不删除，迁移脚本还会额外在 `data/backup/` 里存一份。
+> 想手动跑迁移和看验收报告：`npm run migrate`。
 
 想让同一个 WiFi 下的手机也访问：
 
@@ -173,7 +177,7 @@ sudo systemctl restart homebox
 
 ## 自动备份
 
-数据全在 `data/db.json` 这一个文件里，备份极其简单。每天凌晨三点打包一次到另一个目录：
+数据全在 `data/` 目录里（`homebox.db` + `photos/`），备份极其简单。每天凌晨三点打包一次到另一个目录：
 
 ```bash
 crontab -e
@@ -191,6 +195,18 @@ crontab -e
 >
 > 加了照片之后 `data/` 会明显变大，全量打包一天一次也够用。想更省可以用 `rsync -a --delete data/ 目标位置/`，只传变化的部分，照片这种只增不减的文件尤其合适。
 
+**数据库用的是 SQLite（WAL 模式），直接拷贝正在写入的库有风险**。两种稳妥做法，任选其一：
+
+```bash
+# 做法一：导出成一份人类可读的 JSON（不用停服务，推荐）
+npm run export          # 默认写到 data/backup/homebox-<时间戳>.json
+
+# 做法二：先停服务，再打包整个 data/（.db 与 -wal / -shm 要一起拷）
+systemctl stop homebox 2>/dev/null || pkill -f 'node server.js'
+tar czf /home/orangepi/backup/homebox-$(date +%Y%m%d).tar.gz data/
+node server.js &
+```
+
 ## 给物品加照片
 
 找东西时经常说得出样子、叫不出名字，这时候一张照片顶十句描述。
@@ -205,7 +221,7 @@ crontab -e
 
 **图片在前端就先压缩过。** 手机直出的照片动辄三四千像素、好几 MB，浏览器会先把它画到 canvas 上缩到长边 1280 再转成 JPEG（质量 0.82），通常能压到原来的十分之一以下，肉眼看不出差别，但香橙派的 TF 卡会轻松很多。
 
-**图片存独立文件，不塞进 `db.json`。** 文件放在 `data/photos/` 下，数据库里只留一个文件名。这样数据文件不会被几千张图撑大到读不动，备份时也好分别处理。
+**图片存独立文件，不塞进数据库。** 文件放在 `data/photos/` 下，数据库里只留一个文件名。这样数据库不会被几千张图撑大到读不动，备份时也好分别处理。
 
 **服务端不看文件名，直接读文件头判断图片类型。** 即使有人把一段脚本改名成 `.jpg` 传上来也会被拒掉，只认真正的 jpg / png / webp。单张超过 6MB、或整个请求超过 9MB 会被拒绝并给出提示。
 
@@ -244,7 +260,11 @@ crontab -e
 
 ## 数据说明
 
-`data/db.json` 结构非常简单，可以直接用文本编辑器查看和修改：
+数据存在 `data/homebox.db`（SQLite）里。不想装数据库客户端也能看：导出成 JSON 就行。
+
+```bash
+npm run export          # 写到 data/backup/homebox-<时间戳>.json，结构如下
+```
 
 ```json
 {
@@ -258,7 +278,7 @@ crontab -e
 
 `locations` 通过 `parent` 串成一棵树，`items.locId` 指向这棵树上的某个节点。`kind` 有四种：`home`（家）／`room`（房间）／`furniture`（家具）／`compartment`（抽屉、隔层这类格子）。
 
-衣服不单独建表，是普通物品多挂了一个 `wear` 字段（`{ type, seasons, colors, size, status, wearCount, lastWorn }`）。这样衣服也能被全局搜索到，位置逻辑完全复用。
+衣服不单独建表，是普通物品多挂了一个 `wear` 字段（`{ type, seasons, colors, size, status, wearCount, lastWorn }`，库里存成 JSON 列）。这样衣服也能被全局搜索到，位置逻辑完全复用。
 
 有照片的物品会多一个 `photo` 字段，值是 `data/photos/` 下的文件名：
 
@@ -309,7 +329,21 @@ crontab -e
 
 ```
 HomeBox/
-├── server.js          # 全部后端：HTTP 服务、API、静态资源、照片存取
+├── server.js          # HTTP 服务、路由分派、静态资源、启动
+├── lib/
+│   ├── db.js          # 唯一 require('node:sqlite') 的地方：开库、PRAGMA、事务、schema 迁移
+│   ├── schema.js      # 全部建表语句（DDL）
+│   ├── boot.js        # 启动编排：目录、起库、自动迁移、自检
+│   ├── seed.js        # 首次运行写入的示例数据
+│   ├── migrate-v1.js  # db.json → SQLite 的迁移与 8 条验收
+│   ├── photos.js      # 照片文件读写与输出
+│   ├── http.js        # sendJSON / readBody / 静态文件
+│   ├── util.js        # 时间、id、衣物字典等小工具
+│   └── repo/          # 数据访问：locations / items / events
+├── scripts/
+│   ├── migrate-v1.js  # 迁移（可单独跑，打印验收报告）
+│   ├── export.js      # 导出人类可读 JSON（备份 / 回灌用）
+│   └── smoke-test.js  # 接口冒烟测试（用临时目录与随机端口，不碰真实数据）
 ├── public/
 │   ├── index.html     # 单页结构
 │   ├── app.js         # 前端逻辑（原生 JS，无框架、无构建）
@@ -318,9 +352,10 @@ HomeBox/
 │   ├── manifest.webmanifest   # 加到手机桌面用
 │   └── favicon.svg
 ├── data/              # 运行时生成，不在版本库里
-│   ├── db.json        # 全部数据，就这一个文件
+│   ├── homebox.db     # 全部数据（SQLite，另有 -wal / -shm 临时文件）
+│   ├── backup/        # 迁移前的备份、export 导出的 JSON
 │   └── photos/        # 物品照片
-└── package.json       # 声明了 npm start，实际零依赖
+└── package.json       # npm start / migrate / export / smoke，实际零依赖
 ```
 
 ## 参与改动
