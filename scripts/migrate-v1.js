@@ -95,6 +95,8 @@ function main() {
   line('');
   line('迁移结果：位置 ' + report.counts.locations + ' / 物品 ' + report.counts.items +
     ' / 衣物 ' + report.counts.wear + ' / 照片 ' + report.counts.photo);
+  // 提示（不是失败）：数据被清洗过，用户有权知道哪几条
+  (report.warnings || []).forEach((w) => line('  [提示] ' + w));
   line('');
   line('验收清单');
   let passed = 0;

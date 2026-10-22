@@ -53,6 +53,8 @@ if (runtime.migration) {
     ' / 物品 ' + runtime.migration.counts.items + ' / 验收 ' + passed + '-' +
     runtime.migration.checks.length + ' 通过');
   console.log('[info] 备份： ' + runtime.migration.backup);
+  // 迁移时被清洗过的数据必须让用户看见（数量被改是最容易被忽略的一类）
+  (runtime.migration.warnings || []).forEach((w) => console.log('[提示] ' + w));
 }
 if (runtime.seeded && runtime.seeded.items) {
   console.log('[info] 首次启动，已写入示例数据：位置 ' + runtime.seeded.locations +

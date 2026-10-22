@@ -4,11 +4,13 @@
 // 导出人类可读 JSON（与 v1 的 data/db.json 结构兼容，便于回灌与备份）
 //
 //   node scripts/export.js                     写到 data/backup/homebox-<时间戳>.json
+//   node scripts/export.js --out /mnt/backup   写到指定目录（自动文件名），定时备份用这个
 //   node scripts/export.js --out ./我的备份.json
 //   node scripts/export.js --data ./tmp        指定数据目录
 //
 // 导出的东西是「业务数据」，不含 events 留痕、不含 SQLite 内部结构，
 // 所以拿它当备份/迁移都有意义；反过来也能一眼看出库里的东西对不对。
+// 注意照片不在 JSON 里（只存文件名），照片要单独 rsync data/photos/。
 
 const fs = require('fs');
 const path = require('path');
@@ -54,10 +56,42 @@ function buildDocument() {
   };
 }
 
+/**
+ * 算出导出文件应该写在哪。
+ *
+ * `--out` 支持两种写法：
+ *   · 目录（已存在的目录、以分隔符结尾、或没有 .json 后缀）→ 目录 + 自动文件名
+ *   · 具体文件（带 .json 后缀）→ 就用它
+ *
+ * 支持目录是为了配合定时备份：`npm run export -- --out /mnt/backup`
+ * 这种写法把备份放到「data/ 树外」，不会被后续的全量打包再套一层。
+ *
+ * @param {string} out --out 原始值（可为空）
+ * @param {string} backupDir 默认备份目录
+ * @returns {string} 绝对路径
+ */
+function resolveTarget(out, backupDir) {
+  const name = 'homebox-' + migrate.timestamp() + '.json';
+  if (!out) return path.join(backupDir, name);
+  const abs = path.resolve(out);
+  let isDir = /[\\/]$/.test(out);
+  if (!isDir) {
+    try {
+      isDir = fs.statSync(abs).isDirectory();
+    } catch (err) {
+      // 目录还不存在：没有 .json 后缀就当目录，后面会 mkdir -p
+      isDir = !/\.json$/i.test(abs);
+    }
+  }
+  return isDir ? path.join(abs, name) : abs;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log('用法：node scripts/export.js [--out <文件>] [--data <数据目录>]');
+    console.log('用法：node scripts/export.js [--out <文件或目录>] [--data <数据目录>]');
+    console.log('  --out 目录（或不带 .json 后缀）→ 自动命名为 homebox-<时间戳>.json');
+    console.log('  不写 --out → 默认写到 data/backup/（只适合手动导出；定时备份请指到树外目录）');
     return 0;
   }
 
@@ -82,9 +116,7 @@ function main() {
   }
 
   const doc = buildDocument();
-  const target = args.out
-    ? path.resolve(args.out)
-    : path.join(backupDir, 'homebox-' + migrate.timestamp() + '.json');
+  const target = resolveTarget(args.out, backupDir);
 
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, JSON.stringify(doc, null, 2), 'utf8');

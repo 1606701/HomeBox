@@ -177,35 +177,47 @@ sudo systemctl restart homebox
 
 ## 自动备份
 
-数据全在 `data/` 目录里（`homebox.db` + `photos/`），备份极其简单。每天凌晨三点打包一次到另一个目录：
+数据在 `data/` 目录里：`homebox.db`（SQLite）+ `photos/`（照片文件）。
+**数据库跑在 WAL 模式，服务运行中直接 `tar data/` 可能拷到半新半旧的状态**，所以日常备份走第一种做法。
+
+### 做法一（推荐，不用停服务）：导出成 JSON
+
+`npm run export` 会走和线上同一个连接读库，先跑 `PRAGMA integrity_check` 再落盘，
+导出的是一份人类可读、可回灌的 JSON。**目标目录要在 `data/` 树外**，否则会被别的备份动作再套一层。
 
 ```bash
 crontab -e
-# 加这一行
-0 3 * * * cd /home/orangepi/HomeBox && tar czf /home/orangepi/backup/homebox-$(date +\%Y\%m\%d).tar.gz data/
+# 每天 03:00 导出到树外目录（目录不存在会自动建；也可以写一个具体的 .json 文件名）
+0 3 * * * cd /home/orangepi/HomeBox && /usr/bin/npm run export -- --out /home/orangepi/backup
+```
+
+不写 `--out` 时默认落在 `data/backup/`，那个位置只适合**手动临时导出**，别拿它当定时备份目标。
+
+照片不在 JSON 里（JSON 只记文件名），要另外同步一份：
+
+```bash
+0 3 * * * cd /home/orangepi/HomeBox && rsync -a data/photos/ /home/orangepi/backup/photos/
 ```
 
 保留最近 30 天：
 
 ```bash
-0 4 * * * find /home/orangepi/backup -name 'homebox-*.tar.gz' -mtime +30 -delete
+0 4 * * * find /home/orangepi/backup -name 'homebox-*.json' -mtime +30 -delete
 ```
 
-> 注意：要真正安全，备份的目标位置不能和源在同一块卡上。香橙派的 TF 卡是整个系统里最可能先坏的东西，建议拷到 NAS、U 盘或者干脆 rsync 到你的电脑。
->
-> 加了照片之后 `data/` 会明显变大，全量打包一天一次也够用。想更省可以用 `rsync -a --delete data/ 目标位置/`，只传变化的部分，照片这种只增不减的文件尤其合适。
+### 做法二（需要整库快照时才用）：停服务后打包整个 `data/`
 
-**数据库用的是 SQLite（WAL 模式），直接拷贝正在写入的库有风险**。两种稳妥做法，任选其一：
+**必须先停服务**，再打包，否则 WAL 里可能还有没回写的数据；`.db` 和 `-wal` / `-shm` 要一起拷：
 
 ```bash
-# 做法一：导出成一份人类可读的 JSON（不用停服务，推荐）
-npm run export          # 默认写到 data/backup/homebox-<时间戳>.json
-
-# 做法二：先停服务，再打包整个 data/（.db 与 -wal / -shm 要一起拷）
 systemctl stop homebox 2>/dev/null || pkill -f 'node server.js'
 tar czf /home/orangepi/backup/homebox-$(date +%Y%m%d).tar.gz data/
 node server.js &
 ```
+
+> 注意：要真正安全，备份的目标位置不能和源在同一块卡上。香橙派的 TF 卡是整个系统里最可能先坏的东西，建议拷到 NAS、U 盘或者干脆 rsync 到你的电脑。
+>
+> 加了照片之后 `data/` 会明显变大。照片只增不减，用 `rsync -a` 只传变化的部分最省。
 
 ## 给物品加照片
 
