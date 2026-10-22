@@ -90,7 +90,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log('用法：node scripts/export.js [--out <文件或目录>] [--data <数据目录>]');
-    console.log('  --out 目录（或不带 .json 后缀）→ 自动命名为 homebox-<时间戳>.json');
+    console.log('  --out 带 .json 后缀 → 当成文件名；其它一律当目录，自动命名 homebox-<时间戳>.json');
     console.log('  不写 --out → 默认写到 data/backup/（只适合手动导出；定时备份请指到树外目录）');
     return 0;
   }
