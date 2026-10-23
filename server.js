@@ -517,6 +517,8 @@ async function handleApi(req, res, pathname, query) {
         tags: body.tags,
         wear: body.wear,
         category: body.category,
+        // 类目选「衣物」时用它决定进衣柜的类型（上衣/下装/外套/连衣裙/鞋/配饰）
+        wearType: body.wearType,
         priceCents: priceArg(body),
         buyDate: body.buyDate,
         expireAt: body.expireAt,

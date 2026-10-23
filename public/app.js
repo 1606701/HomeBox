@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v12';
+  var APP_VERSION = 'v13';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -344,6 +344,13 @@
     input.addEventListener('change', function () {
       var file = input.files && input.files[0];
       input.value = '';   // 允许连着选同一张
+      if (!file) return;
+      // 这张照片不只是给模型看的：按存档尺寸压一张挂到照片区，
+      // 识别失败也不浪费，保存时直接跟着上传。
+      var picker = kind === 'item' ? itemPhotos : garmentPhotos;
+      compressImage(file, PHOTO_MAX_SIDE).then(function (out) {
+        if (picker) picker.setPending(out.dataUrl);
+      }).catch(function () { /* 压缩失败不挡识别 */ });
       runRecognize(file, kind, btn);
     });
   });
@@ -405,6 +412,14 @@
       p.cleared = true;
       paint();
     });
+
+    // 识别/其他入口塞一张进来（dataUrl），当作用户自己选的照片
+    p.setPending = function (dataUrl) {
+      if (!dataUrl) return;
+      p.pending = dataUrl;
+      p.cleared = false;
+      paint();
+    };
 
     p.reset = function (existingFile) {
       p.pending = null;
@@ -1442,6 +1457,7 @@
         return '<option value="' + esc(s.k) + '">' + esc(s.n) + '</option>';
       }).join('');
     }
+    syncWearType();
   }
 
   // 归属人下拉：第一项「共用」，默认选当前登录人
@@ -1458,6 +1474,25 @@
     if (sel.value !== want) sel.value = '';
   }
 
+  var WEAR_TYPES_UI = [
+    { k: 'top', n: '上衣' }, { k: 'bottom', n: '下装' }, { k: 'outer', n: '外套' },
+    { k: 'dress', n: '连衣裙' }, { k: 'shoes', n: '鞋' }, { k: 'accessory', n: '配饰' }
+  ];
+
+  // 类目选「衣物」才显示衣物类型；选了才会进衣柜
+  function syncWearType() {
+    var row = $('f-weartype-row');
+    if (!row) return;
+    var sel = $('f-weartype');
+    if (sel && !sel.options.length) {
+      sel.innerHTML = WEAR_TYPES_UI.map(function (t) {
+        return '<option value="' + t.k + '">' + t.n + '</option>';
+      }).join('');
+    }
+    var on = !!$('f-category') && $('f-category').value === '衣物';
+    row.hidden = !on;
+  }
+
   // 「借给谁」只有状态是「借出了」才显示，否则留着只会让人困惑
   function syncLendField() {
     var box = $('f-lendto-field');
@@ -1472,11 +1507,13 @@
     if ($('f-price')) $('f-price').value = '';
     if ($('f-buydate')) $('f-buydate').value = '';
     if ($('f-category')) $('f-category').value = '';
+    if ($('f-weartype')) $('f-weartype').value = 'top';
     if ($('f-state')) $('f-state').value = 'in_use';
     if ($('f-expire')) $('f-expire').value = '';
     if ($('f-remind')) $('f-remind').value = '';
     if ($('f-minqty')) $('f-minqty').value = '';
     syncLendField();
+    syncWearType();
   }
 
   function resetForm() {
@@ -1523,6 +1560,8 @@
     $('f-buydate').value = item.buyDate || '';
     $('f-category').value = item.category || '';
     $('f-state').value = item.state || 'in_use';
+    if (item.wear && item.wear.type) $('f-weartype').value = item.wear.type;
+    syncWearType();
     $('f-expire').value = item.expireAt || '';
     $('f-remind').value = item.remindDays == null ? '' : item.remindDays;
     $('f-minqty').value = item.minQty == null ? '' : item.minQty;
@@ -1601,6 +1640,7 @@
 
   // 状态切到「借出了」才露出「借给谁」
   $('f-state').addEventListener('change', syncLendField);
+  $('f-category').addEventListener('change', syncWearType);
 
   $('item-form').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -1620,6 +1660,8 @@
       expireAt: $('f-expire').value || null,
       remindDays: $('f-remind').value === '' ? null : Number($('f-remind').value),
       minQty: $('f-minqty').value === '' ? null : Number($('f-minqty').value),
+      // 类目是衣物时，把这个类型交给服务端生成 wear，衣柜才看得到
+      wearType: $('f-category').value === '衣物' ? ($('f-weartype').value || 'top') : null,
       lendTo: $('f-state').value === 'lent' ? ($('f-lendto').value.trim() || null) : null
     };
     if (!payload.name) { toast('总得有个名字吧'); return; }

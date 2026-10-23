@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=12" />
+<link rel="stylesheet" href="style.css?v=13" />
 </head>
 <body>
 
@@ -387,6 +387,12 @@
               </label>
             </div>
 
+            <!-- 类目选「衣物」才出现：选了才进衣柜，不选就当普通物品 -->
+            <label class="field" id="f-weartype-row" hidden>
+              <span class="label-text">衣物类型<span class="label-opt">选衣物时才会进衣柜</span></span>
+              <select id="f-weartype"></select>
+            </label>
+
             <label class="field">
               <span class="label-text">过期日期<span class="label-opt">选填，食品、药品用得上</span></span>
               <input id="f-expire" type="date" />
@@ -745,6 +751,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=12"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>
