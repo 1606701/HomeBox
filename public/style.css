@@ -1909,3 +1909,13 @@ input[type='checkbox'] {
   border: 1px solid #ecd9a8; border-radius: 10px;
   background: #fdf3d9; color: #7a5b18; font-size: 13px; line-height: 1.5;
 }
+
+/* 版本不一致时的底部提示条 */
+.update-bar {
+  position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%);
+  z-index: 60; padding: 10px 16px;
+  border: 1px solid #d8c9a8; border-radius: 999px;
+  background: #3c2f22; color: #f7f4ee;
+  font-size: 13px; font-family: inherit; cursor: pointer;
+  box-shadow: 0 2px 10px rgba(60, 47, 34, .18);
+}

@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v13';
+  var APP_VERSION = 'v14';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -59,6 +59,30 @@
   };
 
   /* ---------- 工具 ---------- */
+
+  // 页面手上的代码版本与服务端不一致时，底部弹一条「点一下刷新」。
+  // 这是吃过的亏：改了前端、用户开着旧页面，怎么测都像「功能没生效」。
+  function watchVersion() {
+    var shown = false;
+    function check() {
+      if (shown) return;
+      api('/api/version').then(function (d) {
+        if (!d || !d.version || d.version === APP_VERSION || shown) return;
+        shown = true;
+        var bar = document.createElement('button');
+        bar.type = 'button';
+        bar.className = 'update-bar';
+        bar.textContent = '有新版本（' + d.version + '），点这里刷新';
+        bar.addEventListener('click', function () { location.reload(); });
+        document.body.appendChild(bar);
+      }).catch(function () { /* 离线时忽略 */ });
+    }
+    setInterval(check, 60000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') check();
+    });
+    check();
+  }
 
   var toastTimer = null;
   function toast(msg) {
@@ -2477,6 +2501,7 @@
         $('s-ai-key').value = '';
         paintNotifySettings(data.settings);
         refreshAiStatus();
+    watchVersion();
         showMsg('s-ai-msg', '已保存', false);
         // 保存了但没开开关，是最容易让人以为「没生效」的地方，必须说清楚
         toast(payload.ai.enabled ? '识别已启用，去「记一件」看看' : '已保存，但识别仍是关闭状态');

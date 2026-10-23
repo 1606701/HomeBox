@@ -45,6 +45,14 @@ const DATA_DIR = process.env.HB_DATA_DIR
   : path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
+// 前端版本：启动时从 app.js 里读一次，供 /api/version 告诉页面「你手上的代码过期了」
+let APP_VERSION = 'v0';
+try {
+  const js = require('fs').readFileSync(path.join(PUBLIC_DIR, 'app.js'), 'utf8');
+  const hit = js.match(/APP_VERSION\s*=\s*'([^']+)'/);
+  if (hit) APP_VERSION = hit[1];
+} catch (err) { /* 读不到就算了，版本自检降级成不提示 */ }
+
 /* ---------- 启动 ---------- */
 
 let runtime;
@@ -340,6 +348,11 @@ async function handleApi(req, res, pathname, query) {
     const body = await web.readBody(req);
     const dir = String(body.dir || '').trim();
     return web.sendJSON(res, 200, Object.assign({ ok: true }, backup.probeDir(dir)));
+  }
+
+  // 极轻量：页面定时问一句「现在是哪个版本」，不一致就提示刷新
+  if (pathname === '/api/version' && req.method === 'GET') {
+    return web.sendJSON(res, 200, { ok: true, version: APP_VERSION });
   }
 
   /* ---------- 拍照识别 ---------- */
