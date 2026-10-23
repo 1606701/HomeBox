@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=8" />
+<link rel="stylesheet" href="style.css?v=9" />
 </head>
 <body>
 
@@ -302,6 +302,15 @@
       </div>
     </section>
 
+    <!-- 提醒：今天该关心的东西。四个分组由 app.js 按 kinds 渲染 -->
+    <section id="view-reminders" class="view" aria-label="提醒">
+      <div class="rm-head">
+        <p class="rm-summary" id="rm-summary">今天没有要处理的</p>
+        <button type="button" id="rm-refresh" class="mini">刷新</button>
+      </div>
+      <div id="rm-groups" class="rm-groups"></div>
+    </section>
+
     <section id="view-add" class="view" aria-label="记录新物品">
       <form id="item-form" class="card form">
         <h2 id="form-title">记一件东西</h2>
@@ -367,6 +376,28 @@
                 <select id="f-state"></select>
               </label>
             </div>
+
+            <label class="field">
+              <span class="label-text">过期日期<span class="label-opt">选填，食品、药品用得上</span></span>
+              <input id="f-expire" type="date" />
+            </label>
+
+            <div class="row">
+              <label class="field half">
+                <span class="label-text">提前几天提醒</span>
+                <input id="f-remind" type="number" min="0" max="60" step="1" placeholder="7" />
+              </label>
+              <label class="field half">
+                <span class="label-text">最低库存</span>
+                <input id="f-minqty" type="number" min="0" step="1" placeholder="低于这个数就提醒" />
+              </label>
+            </div>
+
+            <!-- 只有状态选「借出了」才有意义，由 app.js 显隐 -->
+            <label class="field" id="f-lendto-field" hidden>
+              <span class="label-text">借给谁</span>
+              <input id="f-lendto" autocomplete="off" placeholder="比如：邻居老王" />
+            </label>
           </div>
         </details>
 
@@ -424,6 +455,169 @@
 
       <div class="card sv-groups" id="sv-groups"></div>
     </section>
+
+    <!-- 设置：二级视图，从右上角身份面板进入（仅 caps.settings 可见） -->
+    <section id="view-settings" class="view" aria-label="设置">
+      <div class="sv-head">
+        <button type="button" id="settings-back" class="mini">← 返回</button>
+        <span class="sv-title">设置</span>
+      </div>
+
+      <!-- 卡 1 · 邮件提醒 -->
+      <div class="card set-card">
+        <p class="set-title">邮件提醒</p>
+        <p class="set-sub">每天一封，把要留意的几件事凑一起发到邮箱。不配也能用，站内「提醒」页一直在。</p>
+
+        <label class="switch-row">
+          <input type="checkbox" id="s-mail-enabled" />
+          <span>开启邮件提醒</span>
+        </label>
+
+        <label class="field">
+          <span class="label-text">服务器</span>
+          <select id="s-mail-preset">
+            <option value="qq">QQ 邮箱</option>
+            <option value="163">163 邮箱</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+
+        <div class="row" id="s-mail-custom" hidden>
+          <label class="field half">
+            <span class="label-text">SMTP 服务器</span>
+            <input id="s-mail-host" placeholder="smtp.qq.com" autocomplete="off" />
+          </label>
+          <label class="field half">
+            <span class="label-text">端口</span>
+            <input id="s-mail-port" type="number" min="1" max="65535" step="1" placeholder="465" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="label-text">发信邮箱</span>
+          <input id="s-mail-user" type="email" placeholder="完整的，比如 xxx@qq.com" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span class="label-text">授权码</span>
+          <input id="s-mail-pass" type="password" autocomplete="new-password" />
+        </label>
+        <p class="field-hint">
+          <button type="button" class="linkbtn" id="s-mail-pass-help-btn">怎么获取？</button>
+        </p>
+        <div class="set-help" id="s-mail-pass-help" hidden>
+          QQ 邮箱 → 设置 → 账户 → 开启「POP3/SMTP 服务」→ 生成授权码。<br />
+          这里填的是<strong>授权码</strong>，不是登录密码。
+        </div>
+
+        <label class="field">
+          <span class="label-text">收件邮箱</span>
+          <input id="s-mail-to" type="email" placeholder="可以和发信邮箱是同一个" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span class="label-text">每天什么时候发</span>
+          <input id="s-mail-time" type="time" />
+        </label>
+
+        <div class="actions">
+          <button type="button" class="primary" id="s-mail-save">保存</button>
+          <button type="button" class="ghost" id="s-mail-test">发一封测试邮件</button>
+        </div>
+        <p class="errbox" id="s-mail-msg" hidden></p>
+      </div>
+
+      <!-- 卡 2 · 提醒哪些事 -->
+      <div class="card set-card">
+        <p class="set-title">提醒哪些事</p>
+        <p class="set-sub">关掉的那一类不会出现在「提醒」页，也不会进邮件。</p>
+
+        <label class="switch-row">
+          <input type="checkbox" id="s-kind-expire" />
+          <span>快过期了</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="s-kind-lowstock" />
+          <span>快用完了（低于最低库存）</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="s-kind-lent" />
+          <span>借出去还没还</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="s-kind-idle" />
+          <span>很久没动过</span>
+        </label>
+
+        <div class="row set-nums">
+          <label class="field half">
+            <span class="label-text">快过期提前几天</span>
+            <input id="s-expire-days" type="number" min="0" max="60" step="1" />
+          </label>
+          <label class="field half">
+            <span class="label-text">多久没动算闲置（天）</span>
+            <input id="s-idle-days" type="number" min="30" max="3650" step="1" />
+          </label>
+        </div>
+
+        <div class="actions">
+          <button type="button" class="primary" id="s-kinds-save">保存</button>
+        </div>
+        <p class="errbox" id="s-kinds-msg" hidden></p>
+      </div>
+
+      <!-- 卡 3 · 备份 -->
+      <div class="card set-card">
+        <p class="set-title">备份</p>
+        <p class="set-sub">每天凌晨自动备一份，存在这台机器的卡上；填了外部目录会再复制一份过去。</p>
+
+        <div class="field">
+          <span class="label-text">备份位置（外部目录，选填）</span>
+          <span class="inline-row">
+            <input id="s-backup-dir" placeholder="/mnt/nas/homebox" autocomplete="off" />
+            <button type="button" class="mini" id="s-backup-probe">检测可写</button>
+          </span>
+        </div>
+        <p class="probe-msg" id="s-backup-probe-msg" hidden></p>
+
+        <div class="set-kv" id="s-backup-status">
+          <p class="hint">正在读取备份状态…</p>
+        </div>
+        <p class="warn-line" id="s-backup-warn" hidden>只备份在这台机器的卡上，卡坏了会一起没。</p>
+
+        <div class="actions">
+          <button type="button" class="ghost" id="s-backup-run">立即备份一次</button>
+        </div>
+        <p class="errbox" id="s-backup-msg" hidden></p>
+
+        <details class="morebox set-more">
+          <summary>没有 NAS 怎么备份</summary>
+          <div class="morebox-body">
+            <ol class="set-steps">
+              <li>在 NAS（或带 USB 的路由器）上开一个共享文件夹，记下地址、账号、密码。</li>
+              <li>在香橙派上建 <code>/etc/nas.cred</code>，写 <code>username=</code> 和 <code>password=</code> 两行，
+                再把下面这一行加进 <code>/etc/fstab</code>，执行一次 <code>sudo mount -a</code>。</li>
+              <li>回来把挂载后的路径（比如 <code>/mnt/nas</code>）填到上面，点「检测可写」。</li>
+            </ol>
+            <p class="code-line">//192.168.1.100/home /mnt/nas cifs credentials=/etc/nas.cred,uid=1000,iocharset=utf8,vers=3.0,nofail 0 0</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- 卡 4 · 运行状态 -->
+      <div class="card set-card">
+        <p class="set-title">运行状态</p>
+        <div class="set-kv" id="s-job-list">
+          <p class="hint">正在读取…</p>
+        </div>
+        <div class="set-kv" id="s-lastmail"></div>
+        <div class="actions">
+          <button type="button" class="ghost" id="s-job-run">现在发一封摘要</button>
+        </div>
+        <p class="errbox" id="s-job-msg" hidden></p>
+      </div>
+    </section>
+
   </main>
 
   <nav class="tabbar" role="navigation" aria-label="主导航">
@@ -435,6 +629,10 @@
     </button>
     <button class="tab" data-tab="wardrobe" aria-label="衣柜">
       <span class="tab-ico ico-wardrobe" aria-hidden="true"></span>衣柜
+    </button>
+    <button class="tab" data-tab="reminders" aria-label="提醒">
+      <span class="tab-ico ico-bell" aria-hidden="true"></span>提醒
+      <span class="tab-dot" id="tab-dot" hidden>0</span>
     </button>
     <button class="tab" data-tab="add" aria-label="记一件">
       <span class="tab-ico ico-add" aria-hidden="true"></span>记一件
@@ -473,6 +671,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

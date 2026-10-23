@@ -1586,3 +1586,292 @@ body.no-remove #g-photo-del {
 
 /* hidden 属性要压过作者样式里的 display（.tab / .field 都设了 display） */
 [hidden] { display: none !important; }
+
+/* ---------- v2 P3：提醒 · 设置 ----------
+   继续用同一套米色变量，新组件优先复用 .card / .mini / .field / .actions。 */
+
+/* 底部第五个 tab：红点挂在图标右上角 */
+.tab { position: relative; }
+
+.tab-dot {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  margin-left: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 17px;
+  color: #fff;
+  text-align: center;
+  background: var(--danger);
+  border-radius: 9px;
+  box-shadow: 0 0 0 2px var(--card);
+}
+
+.ico-bell {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239a9184' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 9a6 6 0 10-12 0c0 5-2 7-2 7h16s-2-2-2-7z'/%3E%3Cpath d='M10.4 20a2 2 0 003.2 0'/%3E%3C/svg%3E");
+}
+
+.tab.is-active .ico-bell {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b4531f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 9a6 6 0 10-12 0c0 5-2 7-2 7h16s-2-2-2-7z'/%3E%3Cpath d='M10.4 20a2 2 0 003.2 0'/%3E%3C/svg%3E");
+}
+
+/* 提醒页 */
+.rm-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.rm-summary {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.rm-groups { display: flex; flex-direction: column; gap: 18px; }
+
+.rm-gtitle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.rm-count {
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 20px;
+}
+
+.rm-card {
+  margin-bottom: 8px;
+  padding: 13px 15px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.rm-card:hover { border-color: var(--accent); }
+
+.rm-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.rm-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rm-name {
+  font-size: 15px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.rm-qty {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.rm-path {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+  word-break: break-word;
+}
+
+.rm-line {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.rm-line.is-warn { color: var(--danger); }
+
+.rm-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+}
+
+.rm-acts .mini { padding: 4px 10px; font-size: 12px; }
+
+.rm-empty { padding: 44px 10px; text-align: center; }
+.rm-empty-t { margin: 0; font-size: 15px; color: var(--ink-soft); }
+.rm-empty-s { margin: 7px 0 0; font-size: 12px; line-height: 1.6; color: var(--ink-faint); }
+
+/* 角标：过期用红、临期与低库存用橙 */
+.badge-danger { color: #fff; background: var(--danger); }
+.badge-warn { color: #8a4a10; background: #fbe9d5; }
+.gbadge.danger { color: #fff; background: var(--danger); }
+.gbadge.warn { color: #8a4a10; background: #fbe9d5; }
+
+/* 访客没有 caps.write：处理按钮由 CSS 兜底隐藏，JS 侧本就不渲染 */
+body.no-write .rm-acts { display: none !important; }
+
+/* 设置页 */
+.set-card { margin-bottom: 14px; }
+
+.set-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.set-sub {
+  margin: 4px 0 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-faint);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 0;
+  font-size: 14px;
+  color: var(--ink);
+  border-bottom: 1px dashed var(--line);
+}
+
+/* 全局 input 规则会清掉 appearance，复选框必须显式还原，否则根本看不见 */
+input[type='checkbox'] {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  -webkit-appearance: auto;
+  appearance: auto;
+}
+
+.set-nums { margin-top: 14px; }
+.set-nums .field { margin-bottom: 6px; }
+
+.set-help {
+  margin: 2px 0 14px;
+  padding: 11px 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--ink-soft);
+  background: #fbf8f2;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+
+/* 页面内的错误框：失败原因必须留在页面上，不弹 alert */
+.errbox {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  word-break: break-word;
+  background: #fdf0ee;
+  border: 1px solid #efc9c3;
+  border-radius: 10px;
+}
+
+.errbox.is-ok {
+  color: var(--ok);
+  background: #eef5ef;
+  border-color: #cfe2d3;
+}
+
+.inline-row { display: flex; gap: 8px; }
+.inline-row input { flex: 1; min-width: 0; }
+
+.probe-msg { margin: 6px 0 0; font-size: 12px; }
+.probe-msg.is-ok { color: var(--ok); }
+.probe-msg.is-err { color: var(--danger); }
+
+.set-kv {
+  margin-top: 14px;
+  padding-top: 11px;
+  border-top: 1px dashed var(--line);
+}
+
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 7px;
+  font-size: 13px;
+}
+
+.kv-k { flex-shrink: 0; color: var(--ink-faint); }
+
+.kv-v {
+  min-width: 0;
+  color: var(--ink);
+  text-align: right;
+  word-break: break-word;
+}
+
+.kv-v.is-bad { color: var(--danger); }
+.kv-v.is-ok { color: var(--ok); }
+
+.kv-err {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  word-break: break-all;
+}
+
+.warn-line { margin: 10px 0 0; font-size: 12px; color: #8a4a10; }
+
+.set-more { margin-top: 14px; }
+
+.set-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--ink-soft);
+}
+
+.set-steps code {
+  padding: 0 4px;
+  font-size: 11px;
+  background: #f2ede3;
+  border-radius: 4px;
+}
+
+.code-line {
+  margin: 10px 0 0;
+  padding: 10px 11px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  word-break: break-all;
+  background: #f2ede3;
+  border-radius: 8px;
+  -webkit-user-select: all;
+  user-select: all;
+}

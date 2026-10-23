@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v8';
+  var APP_VERSION = 'v9';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -42,6 +42,9 @@
       bootstrap: false
     },
     stats: { by: 'loc', data: null, loading: false },
+    // 提醒页与设置页都是懒加载：切进去才拉，省得每次开机都多两个请求
+    remind: { data: null },
+    notify: { settings: null, jobs: null, backup: null },
     wb: {
       loaded: false,
       stale: true,
@@ -135,6 +138,72 @@
         if (!data || data.ok === false) throw new Error((data && data.error) || '操作失败');
         return data;
       });
+  }
+
+  // 有些接口用 {ok:false, detail} 表达业务失败（比如手动跑任务、检测目录），
+  // 真实原因在 detail 里。用 api() 会被盖成「操作失败」，所以这里不抛错，
+  // 交给调用方自己决定怎么显示。
+  function apiSoft(url, options) {
+    var opts = Object.assign({
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }
+    }, options || {});
+    return fetch(url, opts).then(function (res) {
+      return res.json().catch(function () { throw new Error('服务端返回异常'); });
+    });
+  }
+
+  /* ---------- 日期 ---------- */
+
+  // 本机日期 YYYY-MM-DD。与后端 reminders.localDate 同口径：一律本地时间。
+  // 香橙派没有 RTC，用 toISOString() 会在早上八点前差一天。
+  function todayStr() {
+    var d = new Date();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return d.getFullYear() + '-' + m + '-' + day;
+  }
+
+  /**
+   * 距今天还有几天（正数=未来，负数=已过期）。
+   * 只算到「天」，两端都取当天 00:00 再相减，避开时区和夏令时的零头。
+   * @param {string} dateStr YYYY-MM-DD
+   * @returns {number|null}
+   */
+  function daysUntil(dateStr) {
+    if (!dateStr) return null;
+    var a = new Date(todayStr() + 'T00:00:00').getTime();
+    var b = new Date(String(dateStr).slice(0, 10) + 'T00:00:00').getTime();
+    if (!isFinite(a) || !isFinite(b)) return null;
+    return Math.round((b - a) / 86400000);
+  }
+
+  function fmtBytes(n) {
+    var v = Number(n) || 0;
+    if (v < 1024) return v + ' B';
+    if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+    return (v / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  // ISO 时间戳 → 「2026-10-23 08:30」，设置页只看这一种精度
+  function fmtTime(iso) {
+    if (!iso) return '还没有';
+    return String(iso).slice(0, 16).replace('T', ' ');
+  }
+
+  /**
+   * 页面内错误/提示框。设置页明确要求不 alert，错误原文必须落在页面上。
+   * @param {string} id 元素 id
+   * @param {string} text 文案（空串 = 收起）
+   * @param {boolean} isErr 是否错误
+   */
+  function showMsg(id, text, isErr) {
+    var el = $(id);
+    if (!el) return;
+    if (!text) { el.hidden = true; el.textContent = ''; return; }
+    el.hidden = false;
+    el.className = 'errbox' + (isErr ? '' : ' is-ok');
+    el.textContent = text;
   }
 
   function node(id) { return state.byId[id]; }
@@ -321,6 +390,10 @@
     });
     // 衣柜数据是懒加载的，切进来时才发现数据是旧的就补一次
     if (tab === 'wardrobe' && (state.wb.stale || !state.wb.loaded)) loadWardrobe();
+    // 提醒同理：进来就重新拉一次，红点始终是「现在」的数字
+    if (tab === 'reminders') {
+      loadReminders().catch(function (err) { toast(err.message); });
+    }
   }
 
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (btn) {
@@ -378,9 +451,12 @@
       '</article>';
   }
 
-  // 右下角三个小角标：金额（没权限整块不出现）、类目、归属人
+  // 右下角小角标：过期/临期与低库存（本地算，不额外请求）、金额、类目、归属人
   function itemBadges(item) {
     var out = '';
+    stockBadges(item).forEach(function (b) {
+      out += '<span class="badge badge-' + b.k + '">' + esc(b.t) + '</span>';
+    });
     if (can('seePrice')) {
       // 服务端对无权限角色是「删 key」而不是置 0，必须判断 key 是否存在
       if ('valueCents' in item && item.valueCents != null) {
@@ -392,6 +468,26 @@
     if (item.category) out += '<span class="badge">' + esc(item.category) + '</span>';
     out += '<span class="badge">' + esc(memberName(item.ownerId)) + '</span>';
     return '<div class="result-badges">' + out + '</div>';
+  }
+
+  /**
+   * 过期 / 低库存角标文案。搜索卡片和衣柜卡片共用一套判断，免得两处口径跑偏。
+   * @param {object} item 物品
+   * @returns {{t:string,k:string}[]} k = danger|warn
+   */
+  function stockBadges(item) {
+    var out = [];
+    var left = daysUntil(item.expireAt);
+    if (item.expireAt && left != null) {
+      if (left < 0) out.push({ t: '已过期', k: 'danger' });
+      else if (left <= 3) {
+        out.push({ t: left === 0 ? '今天到期' : left + ' 天后到期', k: 'warn' });
+      }
+    }
+    if (item.minQty != null && Number(item.qty) < Number(item.minQty)) {
+      out.push({ t: '快没了', k: 'warn' });
+    }
+    return out;
   }
 
   function renderItems(box, items, emptyHtml) {
@@ -1272,11 +1368,25 @@
     if (sel.value !== want) sel.value = '';
   }
 
+  // 「借给谁」只有状态是「借出了」才显示，否则留着只会让人困惑
+  function syncLendField() {
+    var box = $('f-lendto-field');
+    if (!box) return;
+    var st = $('f-state');
+    var lent = !!st && st.value === 'lent';
+    box.hidden = !lent;
+    if (!lent && $('f-lendto')) $('f-lendto').value = '';
+  }
+
   function resetMoreFields() {
     if ($('f-price')) $('f-price').value = '';
     if ($('f-buydate')) $('f-buydate').value = '';
     if ($('f-category')) $('f-category').value = '';
     if ($('f-state')) $('f-state').value = 'in_use';
+    if ($('f-expire')) $('f-expire').value = '';
+    if ($('f-remind')) $('f-remind').value = '';
+    if ($('f-minqty')) $('f-minqty').value = '';
+    syncLendField();
   }
 
   function resetForm() {
@@ -1323,12 +1433,18 @@
     $('f-buydate').value = item.buyDate || '';
     $('f-category').value = item.category || '';
     $('f-state').value = item.state || 'in_use';
+    $('f-expire').value = item.expireAt || '';
+    $('f-remind').value = item.remindDays == null ? '' : item.remindDays;
+    $('f-minqty').value = item.minQty == null ? '' : item.minQty;
+    $('f-lendto').value = item.lendTo || '';
+    syncLendField();
     renderOwnerSelect();
     $('f-owner').value = item.ownerId || '';
     // 老数据这些字段都是空的，就不必展开折叠区
     if ($('f-more')) {
       $('f-more').open = !!(item.priceCents != null || item.buyDate ||
-        item.category || (item.state && item.state !== 'in_use'));
+        item.category || (item.state && item.state !== 'in_use') ||
+        item.expireAt || item.minQty != null);
     }
     itemPhotos.reset(item.photo);
     setTab('add');
@@ -1393,6 +1509,9 @@
     setTab('search');
   });
 
+  // 状态切到「借出了」才露出「借给谁」
+  $('f-state').addEventListener('change', syncLendField);
+
   $('item-form').addEventListener('submit', function (e) {
     e.preventDefault();
     if (!can('write')) { toast('当前身份只能看，不能记东西'); return; }
@@ -1406,7 +1525,12 @@
       category: $('f-category').value || null,
       buyDate: $('f-buydate').value || null,
       ownerId: $('f-owner').value || null,
-      state: $('f-state').value || 'in_use'
+      state: $('f-state').value || 'in_use',
+      // 提醒字段：留空一律传 null，表示「不提醒」，绝不给默认日期
+      expireAt: $('f-expire').value || null,
+      remindDays: $('f-remind').value === '' ? null : Number($('f-remind').value),
+      minQty: $('f-minqty').value === '' ? null : Number($('f-minqty').value),
+      lendTo: $('f-state').value === 'lent' ? ($('f-lendto').value.trim() || null) : null
     };
     if (!payload.name) { toast('总得有个名字吧'); return; }
 
@@ -1688,6 +1812,10 @@
     var badge = w.status !== 'ready'
       ? '<span class="gbadge ' + esc(w.status) + '">' + esc(statusN(w.status)) + '</span>'
       : '';
+    // 衣服也会过期（香水、护肤品）或低于库存，和搜索卡片同一套判断
+    var stock = stockBadges(g).map(function (b) {
+      return '<span class="gbadge ' + b.k + '">' + esc(b.t) + '</span>';
+    }).join('');
     var occasions = (w.occasions && w.occasions.length) ? ' · ' + w.occasions.join('/') : '';
     // 有照片就用照片，没照片才退回到色块
     var media = g.photo
@@ -1705,7 +1833,7 @@
     return '<article class="gcard">' +
       media +
       '<span class="gbody">' +
-        '<span class="gtop"><span class="gname">' + esc(g.name) + '</span>' + badge +
+        '<span class="gtop"><span class="gname">' + esc(g.name) + '</span>' + badge + stock +
           '<span class="gbadge own">' + esc(memberName(g.ownerId)) + '</span></span>' +
         '<span class="gmeta">' + esc(meta) + '</span>' +
         '<span class="gpath">' + esc(g.path) + '</span>' +
@@ -1925,6 +2053,502 @@
 
   $('outfit-reroll').addEventListener('click', function () { suggestOutfit(); });
 
+  /* ---------- 提醒 ----------
+     后端只给数据和分类，人话说明在这里拼：一句话说清「还有几天 / 还剩几个 / 借了多久」，
+     不用让用户自己换算 daysLeft。 */
+
+  var REMIND_ORDER = ['expire', 'lowStock', 'lent', 'idle'];
+  var REMIND_EMPTY = '<div class="rm-empty">' +
+    '<p class="rm-empty-t">暂时没有要操心的事</p>' +
+    '<p class="rm-empty-s">给东西填上过期日期或最低库存后，这里会自动提醒。</p>' +
+    '</div>';
+
+  var ACK_TEXT = {
+    done: '已处理，今天不再出现',
+    snooze: '好，7 天后再提醒你',
+    mute: '这件以后不再提醒'
+  };
+
+  function loadReminders() {
+    return api('/api/reminders').then(function (data) {
+      state.remind.data = data;
+      paintTabDot(data.counts);
+      if (state.tab === 'reminders') renderReminders();
+      return data;
+    });
+  }
+
+  // 红点：进页面不消失，只有处理掉或刷新时后端不再返回才减
+  function paintTabDot(counts) {
+    var el = $('tab-dot');
+    if (!el) return;
+    var n = counts && counts.total ? Number(counts.total) : 0;
+    el.hidden = n <= 0;
+    el.textContent = n > 9 ? '9+' : String(n);
+  }
+
+  /**
+   * 一条提醒的人话说明。
+   * @param {string} kind expire|lowStock|lent|idle
+   * @param {object} e 提醒条目
+   * @returns {{t:string, warn:boolean}} warn = 要标红
+   */
+  function reminderText(kind, e) {
+    if (kind === 'expire') {
+      var left = Number(e.daysLeft);
+      if (left < 0) return { t: '已过期 ' + Math.abs(left) + ' 天', warn: true };
+      if (left === 0) return { t: '今天到期', warn: true };
+      return { t: '还有 ' + left + ' 天到期（' + e.expireAt + '）', warn: false };
+    }
+    if (kind === 'lowStock') {
+      return { t: '只剩 ' + e.qty + ' 个，低于你设的 ' + e.minQty + ' 个', warn: false };
+    }
+    if (kind === 'lent') {
+      return { t: '借给' + (e.lendTo || '别人') + ' ' + e.daysLent + ' 天了', warn: false };
+    }
+    if (kind === 'idle') return { t: '已经 ' + e.idleDays + ' 天没动过', warn: false };
+    return { t: '', warn: false };
+  }
+
+  function reminderCard(kind, e) {
+    var line = reminderText(kind, e);
+    var acts = '';
+    if (can('write')) {
+      var attrs = ' data-id="' + esc(e.id) + '" data-kind="' + esc(kind) + '"';
+      acts = '<div class="rm-acts">' +
+        '<button type="button" class="mini" data-rm="done"' + attrs + '>已处理</button>' +
+        '<button type="button" class="mini" data-rm="snooze"' + attrs + '>稍后 7 天</button>' +
+        '<button type="button" class="mini" data-rm="mute"' + attrs + '>不再提醒</button>' +
+      '</div>';
+    }
+    return '<article class="rm-card" role="button" tabindex="0" data-rm-open="1"' +
+        ' data-name="' + esc(e.name) + '" data-id="' + esc(e.id) + '">' +
+      '<div class="rm-top">' +
+        '<span class="rm-name">' + esc(e.name) + '</span>' +
+        '<span class="rm-qty">×' + esc(e.qty || 1) + '</span>' +
+      '</div>' +
+      '<p class="rm-path">' + esc(e.path || '未归档') + '</p>' +
+      '<p class="rm-line' + (line.warn ? ' is-warn' : '') + '">' + esc(line.t) + '</p>' +
+      acts +
+    '</article>';
+  }
+
+  function renderReminders() {
+    var data = state.remind.data;
+    var box = $('rm-groups');
+    if (!data) {
+      $('rm-summary').textContent = '正在看看今天有什么…';
+      box.innerHTML = '<p class="hint">正在读取…</p>';
+      return;
+    }
+    var total = data.counts ? data.counts.total : 0;
+    $('rm-summary').textContent = total
+      ? '今天有 ' + total + ' 件事要留意'
+      : '今天没有要处理的';
+
+    var labels = data.labels || {};
+    var html = '';
+    REMIND_ORDER.forEach(function (kind) {
+      var list = (data.groups && data.groups[kind]) || [];
+      if (!list.length) return;
+      html += '<section class="rm-group">' +
+        '<p class="rm-gtitle">' + esc(labels[kind] || kind) +
+          '<span class="rm-count">' + list.length + '</span></p>' +
+        list.map(function (e) { return reminderCard(kind, e); }).join('') +
+      '</section>';
+    });
+    box.innerHTML = html || REMIND_EMPTY;
+  }
+
+  // 点卡片主体 → 去「找东西」里搜它。复用现成的搜索链路，不另写一套。
+  function jumpToSearch(name) {
+    state.query = String(name || '');
+    $('search').value = state.query;
+    setTab('search');
+    doSearch();
+  }
+
+  // 先本地摘掉再重新拉：网络慢的时候也不会看到刚处理完的条目赖着不动
+  function removeReminderLocally(id, kind) {
+    var data = state.remind.data;
+    if (!data || !data.groups || !data.groups[kind]) return;
+    data.groups[kind] = data.groups[kind].filter(function (x) { return x.id !== id; });
+    if (data.counts) {
+      data.counts[kind] = data.groups[kind].length;
+      data.counts.total = REMIND_ORDER.reduce(function (n, k) {
+        return n + ((data.groups[k] || []).length);
+      }, 0);
+    }
+    paintTabDot(data.counts);
+    renderReminders();
+  }
+
+  function sendAck(id, kind, action, btn) {
+    if (!can('write')) { toast('当前身份只能看'); return; }
+    if (btn) btn.disabled = true;
+    api('/api/reminders/' + encodeURIComponent(id) + '/' + encodeURIComponent(kind) + '/ack', {
+      method: 'POST', body: JSON.stringify({ action: action })
+    }).then(function () {
+      toast(ACK_TEXT[action] || '已处理');
+      removeReminderLocally(id, kind);
+      return loadReminders();
+    }).catch(function (err) {
+      if (btn) btn.disabled = false;
+      toast(err.message);
+    });
+  }
+
+  $('rm-groups').addEventListener('click', function (e) {
+    var ack = e.target.closest ? e.target.closest('[data-rm]') : null;
+    if (ack) {
+      sendAck(ack.dataset.id, ack.dataset.kind, ack.dataset.rm, ack);
+      return;
+    }
+    var card = e.target.closest ? e.target.closest('[data-rm-open]') : null;
+    if (card) jumpToSearch(card.dataset.name);
+  });
+
+  // 卡片是 role=button，键盘也要能进去
+  $('rm-groups').addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var card = e.target.closest ? e.target.closest('[data-rm-open]') : null;
+    if (!card) return;
+    e.preventDefault();
+    jumpToSearch(card.dataset.name);
+  });
+
+  $('rm-refresh').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    loadReminders().then(function () {
+      btn.disabled = false;
+    }).catch(function (err) {
+      btn.disabled = false;
+      toast(err.message);
+    });
+  });
+
+  /* ---------- 设置（仅管理员） ---------- */
+
+  var MAIL_PRESETS = {
+    qq: { host: 'smtp.qq.com', port: 465 },
+    163: { host: 'smtp.163.com', port: 465 }
+  };
+
+  var JOB_STATUS_TEXT = { ok: '成功', failed: '失败', skipped: '跳过', running: '进行中' };
+  var MAIL_STATUS_TEXT = { sent: '已发送', failed: '失败', pending: '待发送' };
+
+  function openSettings() {
+    if (!can('settings')) return;
+    if (state.tab !== 'settings') state.prevTab = state.tab;
+    setTab('settings');
+    window.scrollTo(0, 0);
+    loadNotifySettings();
+    loadBackupStatus();
+    loadJobStatus();
+  }
+
+  $('settings-back').addEventListener('click', function () {
+    setTab(state.prevTab === 'settings' ? 'search' : (state.prevTab || 'search'));
+  });
+
+  function toggleCustomMail(preset) {
+    var box = $('s-mail-custom');
+    if (box) box.hidden = preset !== 'custom';
+  }
+
+  function syncIdleInput() {
+    var box = $('s-idle-days');
+    if (box) box.disabled = !$('s-kind-idle').checked;
+  }
+
+  function loadNotifySettings() {
+    return api('/api/notify/settings').then(function (data) {
+      state.notify.settings = data.settings;
+      paintNotifySettings(data.settings);
+    }).catch(function (err) {
+      showMsg('s-mail-msg', '读不到设置：' + err.message, true);
+    });
+  }
+
+  function paintNotifySettings(s) {
+    if (!s) return;
+    var mail = s.mail || {};
+    $('s-mail-enabled').checked = !!mail.enabled;
+    $('s-mail-preset').value = mail.preset || 'custom';
+    $('s-mail-host').value = mail.host || '';
+    $('s-mail-port').value = mail.port || 465;
+    $('s-mail-user').value = mail.user || '';
+    $('s-mail-to').value = mail.to || '';
+    $('s-mail-time').value = mail.time || '08:30';
+    // 授权码永远拿不到明文：只在有值时换个 placeholder 提示「已保存」
+    var pass = $('s-mail-pass');
+    pass.value = '';
+    pass.placeholder = mail.hasPass ? '已保存，留空表示不修改' : 'QQ 邮箱的授权码，不是登录密码';
+    toggleCustomMail(mail.preset || 'custom');
+
+    var kinds = s.kinds || {};
+    $('s-kind-expire').checked = !!kinds.expire;
+    $('s-kind-lowstock').checked = !!kinds.lowStock;
+    $('s-kind-lent').checked = !!kinds.lent;
+    $('s-kind-idle').checked = !!kinds.idle;
+    $('s-expire-days').value = s.expireDays == null ? 7 : s.expireDays;
+    $('s-idle-days').value = s.idleDays == null ? 365 : s.idleDays;
+    syncIdleInput();
+
+    var b = s.backup || {};
+    $('s-backup-dir').value = b.dir || '';
+    $('s-backup-warn').hidden = !!b.dir;
+  }
+
+  $('s-mail-preset').addEventListener('change', function () {
+    var p = MAIL_PRESETS[this.value];
+    if (p) {
+      $('s-mail-host').value = p.host;
+      $('s-mail-port').value = p.port;
+    }
+    toggleCustomMail(this.value);
+  });
+
+  $('s-mail-pass-help-btn').addEventListener('click', function () {
+    var box = $('s-mail-pass-help');
+    box.hidden = !box.hidden;
+  });
+
+  $('s-kind-idle').addEventListener('change', syncIdleInput);
+
+  function collectMailPatch() {
+    var preset = $('s-mail-preset').value;
+    var host = $('s-mail-host').value.trim();
+    var port = Number($('s-mail-port').value) || 465;
+    // 预设优先：用户选了 QQ/163 就不该被输入框里的旧值带跑
+    if (preset !== 'custom' && MAIL_PRESETS[preset]) {
+      host = MAIL_PRESETS[preset].host;
+      port = MAIL_PRESETS[preset].port;
+    }
+    var user = $('s-mail-user').value.trim();
+    var patch = {
+      mail: {
+        enabled: $('s-mail-enabled').checked,
+        host: host,
+        port: port,
+        user: user,
+        from: user,
+        to: $('s-mail-to').value.trim(),
+        time: $('s-mail-time').value || '08:30'
+      }
+    };
+    // 三态里的「不改」：留空就不传 pass，后端会保留原来的授权码
+    var pass = $('s-mail-pass').value;
+    if (pass) patch.mail.pass = pass;
+    return patch;
+  }
+
+  $('s-mail-save').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    api('/api/notify/settings', { method: 'PUT', body: JSON.stringify(collectMailPatch()) })
+      .then(function (data) {
+        state.notify.settings = data.settings;
+        // 重画会顺手清空授权码输入框：明文不在页面上多留一秒
+        paintNotifySettings(data.settings);
+        showMsg('s-mail-msg', '', false);
+        toast('设置已保存');
+        loadJobStatus();
+      })
+      .catch(function (err) { showMsg('s-mail-msg', err.message, true); })
+      .then(function () { btn.disabled = false; });
+  });
+
+  $('s-mail-test').addEventListener('click', function () {
+    var btn = this;
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '正在发…';
+    showMsg('s-mail-msg', '', false);
+    // SMTP 是同步等结果的，可能要几秒，按钮必须说清楚它还在干活
+    api('/api/notify/test', { method: 'POST' })
+      .then(function () {
+        toast('发出去了，去收件箱看看（可能在垃圾箱）');
+      })
+      .catch(function (err) {
+        // 后端的 SMTP 原始错误最有诊断价值，原样放在红框里
+        showMsg('s-mail-msg', err.message, true);
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = old;
+      });
+  });
+
+  $('s-kinds-save').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    var patch = {
+      kinds: {
+        expire: $('s-kind-expire').checked,
+        lowStock: $('s-kind-lowstock').checked,
+        lent: $('s-kind-lent').checked,
+        idle: $('s-kind-idle').checked
+      },
+      expireDays: Number($('s-expire-days').value) || 0,
+      idleDays: Number($('s-idle-days').value) || 365
+    };
+    api('/api/notify/settings', { method: 'PUT', body: JSON.stringify(patch) })
+      .then(function (data) {
+        state.notify.settings = data.settings;
+        paintNotifySettings(data.settings);
+        showMsg('s-kinds-msg', '', false);
+        toast('已保存');
+        // 关掉某类之后，提醒页和红点要立刻跟着变
+        state.remind.data = null;
+        loadReminders().catch(function () { /* 提醒页拉不到不影响设置 */ });
+      })
+      .catch(function (err) { showMsg('s-kinds-msg', err.message, true); })
+      .then(function () { btn.disabled = false; });
+  });
+
+  /* ---------- 设置 · 备份 ---------- */
+
+  function loadBackupStatus() {
+    return api('/api/backup/status').then(function (data) {
+      state.notify.backup = data.backup;
+      renderBackupStatus(data.backup);
+    }).catch(function (err) {
+      $('s-backup-status').innerHTML = '<p class="hint">读取失败：' + esc(err.message) + '</p>';
+    });
+  }
+
+  function renderBackupStatus(b) {
+    if (!b) return;
+    var ext = b.externalDir
+      ? (b.externalWritable ? '可写 · ' + b.externalDir : '不可用 · ' + (b.externalMessage || ''))
+      : '没配置';
+    var rows = [
+      { k: '本地备份', v: b.count + ' 份（最多留 ' + b.keepLocal + ' 份）' },
+      { k: '最近一次', v: fmtTime(b.latestAt) },
+      { k: '占用大小', v: fmtBytes(b.bytes) },
+      { k: '外部目录', v: ext, bad: !!b.externalDir && !b.externalWritable }
+    ];
+    $('s-backup-status').innerHTML = rows.map(function (r) {
+      return '<p class="kv-row"><span class="kv-k">' + esc(r.k) + '</span>' +
+        '<span class="kv-v' + (r.bad ? ' is-bad' : '') + '">' + esc(r.v) + '</span></p>';
+    }).join('');
+    $('s-backup-warn').hidden = !!b.externalDir;
+  }
+
+  $('s-backup-probe').addEventListener('click', function () {
+    var btn = this;
+    var dir = $('s-backup-dir').value.trim();
+    btn.disabled = true;
+    // probe 的 ok 表示「这个目录可写」，不是「请求成功」，所以走 apiSoft
+    apiSoft('/api/backup/probe', { method: 'POST', body: JSON.stringify({ dir: dir }) })
+      .then(function (data) {
+        var ok = !!(data && data.ok);
+        var el = $('s-backup-probe-msg');
+        el.hidden = false;
+        el.className = 'probe-msg ' + (ok ? 'is-ok' : 'is-err');
+        el.textContent = (data && data.message) || (ok ? '可写' : '这个目录写不了');
+      })
+      .catch(function (err) {
+        var el = $('s-backup-probe-msg');
+        el.hidden = false;
+        el.className = 'probe-msg is-err';
+        el.textContent = err.message;
+      })
+      .then(function () { btn.disabled = false; });
+  });
+
+  $('s-backup-run').addEventListener('click', function () {
+    var btn = this;
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '正在备份…';
+    api('/api/backup/run', { method: 'POST' })
+      .then(function (data) {
+        var out = data.backup || {};
+        var msg = '备份好了：' + fmtBytes(out.bytes) + '（本地）';
+        if (out.externalFile) msg += '，外部也复制了一份';
+        if (out.externalError) msg = '本地备份好了，但外部失败：' + out.externalError;
+        toast(msg);
+        if (data.status) {
+          state.notify.backup = data.status;
+          renderBackupStatus(data.status);
+        } else {
+          loadBackupStatus();
+        }
+        loadJobStatus();
+      })
+      .catch(function (err) { toast(err.message); })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = old;
+      });
+  });
+
+  /* ---------- 设置 · 运行状态 ---------- */
+
+  function loadJobStatus() {
+    return api('/api/jobs/status').then(function (data) {
+      state.notify.jobs = data;
+      renderJobStatus(data);
+    }).catch(function (err) {
+      $('s-job-list').innerHTML = '<p class="hint">读取失败：' + esc(err.message) + '</p>';
+    });
+  }
+
+  function jobRow(label, job, at) {
+    var st = job ? job.status : '';
+    var tone = st === 'failed' ? ' is-bad' : (st === 'ok' ? ' is-ok' : '');
+    return '<p class="kv-row"><span class="kv-k">' + esc(label) + '（' + esc(at) + '）</span>' +
+      '<span class="kv-v' + tone + '">' + esc(JOB_STATUS_TEXT[st] || '未跑') +
+      (job && job.detail ? ' · ' + esc(job.detail) : '') + '</span></p>';
+  }
+
+  function renderJobStatus(s) {
+    if (!s) return;
+    var jobs = s.jobs || {};
+    var html = jobRow('备份', jobs.backup, s.backupTime || '03:00') +
+      jobRow('摘要邮件', jobs.daily, s.mailTime || '08:30');
+    if (!s.mailReady) html += '<p class="hint">邮件还没配置完整，摘要暂时发不出去。</p>';
+    $('s-job-list').innerHTML = html;
+
+    var m = s.lastMail;
+    if (!m) {
+      $('s-lastmail').innerHTML = '<p class="hint">还没有发过邮件</p>';
+      return;
+    }
+    $('s-lastmail').innerHTML =
+      '<p class="kv-row"><span class="kv-k">最近一封邮件</span>' +
+        '<span class="kv-v">' + esc(m.subject || '（没有标题）') + '</span></p>' +
+      '<p class="kv-row"><span class="kv-k">状态</span>' +
+        '<span class="kv-v' + (m.status === 'failed' ? ' is-bad' : '') + '">' +
+        esc(MAIL_STATUS_TEXT[m.status] || m.status) + ' · 尝试 ' + esc(m.attempts) + ' 次</span></p>' +
+      '<p class="kv-row"><span class="kv-k">时间</span>' +
+        '<span class="kv-v">' + esc(fmtTime(m.sentAt || m.createdAt)) + '</span></p>' +
+      (m.lastError ? '<p class="kv-err">' + esc(m.lastError) + '</p>' : '');
+  }
+
+  $('s-job-run').addEventListener('click', function () {
+    var btn = this;
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '正在发…';
+    showMsg('s-job-msg', '', false);
+    // 失败时后端回的是 {ok:false, detail}，用 apiSoft 才拿得到真实原因
+    apiSoft('/api/jobs/run', { method: 'POST', body: JSON.stringify({ job: 'daily' }) })
+      .then(function (data) {
+        if (data && data.ok) toast(data.detail || '已发出去');
+        else showMsg('s-job-msg', (data && data.detail) || '发送失败', true);
+        loadJobStatus();
+      })
+      .catch(function (err) { showMsg('s-job-msg', err.message, true); })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = old;
+      });
+  });
+
   /* ---------- 身份与门禁 ---------- */
 
   function applyAuth(data) {
@@ -1955,6 +2579,9 @@
 
     if (!can('write') && state.tab === 'add') setTab('search');
     if (!can('stats') && state.tab === 'stats') setTab(state.prevTab || 'search');
+    if (!can('settings') && state.tab === 'settings') {
+      setTab(state.prevTab === 'settings' ? 'search' : (state.prevTab || 'search'));
+    }
     if (!can('members')) $('mm').hidden = true;
   }
 
@@ -1978,6 +2605,8 @@
     if ($('f-owner')) $('f-owner').value = '';
     renderOwnerSelect();
     renderRoleOptions();
+    // 红点要在开机时就出现，不能等用户点进提醒页才算
+    loadReminders().catch(function () { /* 提醒拉不到不影响别的功能 */ });
     return Promise.all([loadLocations(), doSearch(), loadStats()]).catch(function (err) {
       console.error(err);
       toast('加载失败：' + err.message);
@@ -2161,6 +2790,9 @@
     if (can('members')) {
       html += '<button type="button" class="who-item" data-who="manage">成员管理</button>';
     }
+    if (can('settings')) {
+      html += '<button type="button" class="who-item" data-who="settings">设置</button>';
+    }
     html += '<button type="button" class="who-item danger" data-who="logout">退出登录</button>';
     panel.innerHTML = html;
     panel.hidden = false;
@@ -2188,6 +2820,7 @@
     $('who-panel').hidden = true;
     if (act === 'logout') logout();
     if (act === 'manage') openMembers();
+    if (act === 'settings') openSettings();
   });
 
   document.addEventListener('click', function (e) {

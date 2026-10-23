@@ -58,7 +58,9 @@ function maskField(ctx, key, value) {
 // 这些字段的正确性由 qa/qa-p2.js 单独覆盖，不在这里比。
 const P2_ONLY = new Set([
   'category', 'state', 'ownerId', 'ownerName',
-  'priceCents', 'valueCents', 'buyDate', 'owners', 'currency'
+  'priceCents', 'valueCents', 'buyDate', 'owners', 'currency',
+  // P3 新增：提醒与借出相关
+  'expireAt', 'remindDays', 'minQty', 'lendTo', 'lendAt'
 ]);
 
 /**

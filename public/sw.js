@@ -13,8 +13,8 @@
 //   · /photos/ 物品照片：同样走 stale-while-revalidate。家里断网或香橙派重启的
 //     那几十秒照样能翻照片找东西；文件名每次上传都重新生成，不会看到旧图。
 
-var CACHE = 'homebox-v8';
-var LEGACY = ['homebox-v1', 'homebox-v2', 'homebox-v3', 'homebox-v4', 'homebox-v5', 'homebox-v6', 'homebox-v7'];
+var CACHE = 'homebox-v9';
+var LEGACY = ['homebox-v1', 'homebox-v2', 'homebox-v3', 'homebox-v4', 'homebox-v5', 'homebox-v6', 'homebox-v7', 'homebox-v8'];
 
 // 一次性自愈：早于 v6 的版本都是 cache-first，会死死抓住旧资源不放。
 // 装到新版时先把它们的缓存全部铲掉，断掉这个死循环。
