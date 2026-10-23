@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v14';
+  var APP_VERSION = 'v16';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -931,8 +931,20 @@
 
   /* ---------- 家的地图（俯视图） ---------- */
 
-  var ROOM_FILLS = ['#f7f1e4', '#eaeff6', '#eef4ec', '#f7ecf0', '#f2efe6', '#eaf2f2'];
-  var HEATS = ['#e3dac9', '#f0cba6', '#e7a862', '#c4662c'];
+  // 房间按暖木色系分色：客厅最暖、卧室偏粉木、厨房偏橄榄、卫生间偏青
+  var ROOM_FILLS = ['#ead9c3', '#efe0d6', '#e3e7d5', '#dce7e7', '#e9dcc9', '#ede5d8'];
+  // 按房间名固定配色：客厅永远是暖木、卧室偏粉、厨房偏橄榄、卫生间偏青。
+  // 之前按数组下标取色，增删一个房间会让所有房间换色，看着很跳。
+  function roomFill(name, index) {
+    var n = String(name || '');
+    if (/客厅|起居|餐厅/.test(n)) return ROOM_FILLS[0];
+    if (/卧|主卧|次卧|儿童房|书房/.test(n)) return ROOM_FILLS[1];
+    if (/厨|餐厨/.test(n)) return ROOM_FILLS[2];
+    if (/卫|浴|洗手间|厕/.test(n)) return ROOM_FILLS[3];
+    if (/玄关|门厅|入户|阳台|储藏/.test(n)) return ROOM_FILLS[4];
+    return ROOM_FILLS[(index || 0) % ROOM_FILLS.length];
+  }
+  var HEATS = ['#efe3d0', '#e8c89f', '#d79a5e', '#b4633a'];
 
   function heat(n) {
     if (!n) return HEATS[0];
@@ -985,7 +997,7 @@
     if (!state.editMode || state.selId !== n.id || !n.box) return '';
     return '<rect class="hnd" data-hnd="1" x="' + (n.box.x + n.box.w - 3) +
       '" y="' + (n.box.y + n.box.h - 3) + '" width="3" height="3" rx="0.7" ' +
-      'fill="#b4531f" stroke="#fff" stroke-width="0.35"/>';
+      'fill="#b4633a" stroke="#fff" stroke-width="0.35"/>';
   }
 
   function paintPlan() {
@@ -997,7 +1009,7 @@
     var furns = state.flat.filter(function (n) { return n.kind === 'furniture' && n.box; });
 
     var p = [];
-    p.push('<rect x="0" y="0" width="' + VB.w + '" height="' + VB.h + '" rx="1.5" fill="#f2ede2"/>');
+    p.push('<rect x="0" y="0" width="' + VB.w + '" height="' + VB.h + '" rx="1.5" fill="#f6efe3"/>');
 
     // 编辑模式下画网格，方便把房间对齐
     if (state.editMode) {
@@ -1020,8 +1032,8 @@
       p.push('<g data-id="' + esc(r.id) + '" data-kind="room" class="rm' +
         (state.editMode ? ' editable' : '') + '">');
       p.push('<rect x="' + b.x + '" y="' + b.y + '" width="' + b.w + '" height="' + b.h +
-        '" rx="1.6" fill="' + ROOM_FILLS[ri % ROOM_FILLS.length] +
-        '" stroke="' + (sel ? '#b4531f' : (active ? '#b4531f' : '#ddd4c3')) +
+        '" rx="1.6" fill="' + roomFill(r.name, ri) +
+        '" stroke="' + (sel ? '#b4633a' : (active ? '#b4633a' : '#e0d5c2')) +
         '" stroke-width="' + (sel ? 1 : (active ? 0.7 : 0.3)) + '"/>');
       p.push('<text class="rmname" x="' + (b.x + 2) + '" y="' + (b.y + 4.6) + '">' + esc(r.name) + '</text>');
       p.push('<text class="rmcount" x="' + (b.x + b.w - 2) + '" y="' + (b.y + 4.6) +
@@ -1041,7 +1053,7 @@
         (state.editMode ? ' editable' : '') + '">');
       p.push('<rect x="' + b.x + '" y="' + b.y + '" width="' + b.w + '" height="' + b.h +
         '" rx="1.2" fill="' + heat(f.totalCount) +
-        '" stroke="' + (sel ? '#b4531f' : (active ? '#7c3512' : 'rgba(0,0,0,0.14)')) +
+        '" stroke="' + (sel ? '#b4633a' : (active ? '#8e4a29' : 'rgba(58,46,36,0.16)')) +
         '" stroke-width="' + (sel ? 0.9 : (active ? 0.8 : 0.3)) + '"/>');
       p.push('<text class="fnname" x="' + (b.x + b.w / 2) + '" y="' + (b.y + b.h / 2 + 0.2) +
         '" text-anchor="middle">' + esc(f.name) + '</text>');
@@ -1075,10 +1087,11 @@
     var n = node(g.dataset.id);
     if (!n || !n.box || n.kind === 'home') return;
     var pt = toVB(e);
+    var orig = { x: n.box.x, y: n.box.y, w: n.box.w, h: n.box.h };
     if (hnd) {
-      drag = { n: n, mode: 'resize', sw: n.box.w, sh: n.box.h, sx: pt.x, sy: pt.y };
+      drag = { n: n, mode: 'resize', sw: n.box.w, sh: n.box.h, sx: pt.x, sy: pt.y, orig: orig };
     } else {
-      drag = { n: n, mode: 'move', offX: pt.x - n.box.x, offY: pt.y - n.box.y };
+      drag = { n: n, mode: 'move', offX: pt.x - n.box.x, offY: pt.y - n.box.y, orig: orig };
     }
     dragMoved = false;
     selectPlanNode(n.id);
@@ -1118,8 +1131,16 @@
   function endDrag() {
     if (!drag) return;
     var n = drag.n;
+    var origBox = drag.orig;
     drag = null;
     if (!dragMoved) return;
+    // 记一步撤销：拖拽是破坏性的，松手前的那一版要能找回
+    undoStack.push({ label: '拖动摆放', snap: { id: n.id, name: n.name, parent: n.parent || null, box: origBox } });
+    if (undoStack.length > 10) undoStack.shift();
+    lastPushAt = 0;
+    lastPushId = null;
+    paintUndo();
+
     var payload = { box: n.box };
     var movedTo = null;
     if (n.kind === 'furniture') {
@@ -1248,6 +1269,94 @@
     paintPlan();
   }
 
+  /* ---------- 撤销 ---------- */
+
+  // 手机上拖不准、点错一步就没法回头，所以给 10 步撤销。
+  // 连点方向键时合并成一步：否则撤销十次才挪回原位，很难用。
+  var undoStack = [];
+  var lastPushAt = 0;
+  var lastPushId = null;
+
+  function snapOf(n) {
+    return {
+      id: n.id,
+      name: n.name,
+      parent: n.parent || null,
+      box: n.box ? { x: n.box.x, y: n.box.y, w: n.box.w, h: n.box.h } : null
+    };
+  }
+
+  function pushUndo(n, label) {
+    if (!n) return;
+    var now = Date.now();
+    if (now - lastPushAt < 800 && lastPushId === n.id) return;
+    undoStack.push({ label: label, snap: snapOf(n) });
+    if (undoStack.length > 10) undoStack.shift();
+    lastPushAt = now;
+    lastPushId = n.id;
+    paintUndo();
+  }
+
+  function paintUndo() {
+    [['plan-undo', '撤销'], ['ed-undo', '撤销']].forEach(function (pair) {
+      var b = $(pair[0]);
+      if (!b) return;
+      b.disabled = !undoStack.length;
+      b.textContent = undoStack.length ? '撤销 ' + undoStack.length : pair[1];
+    });
+  }
+
+  function undoLast() {
+    var item = undoStack.pop();
+    if (!item) return;
+    var s = item.snap;
+    api('/api/locations/' + encodeURIComponent(s.id), {
+      method: 'PUT',
+      body: JSON.stringify({ name: s.name, box: s.box, parent: s.parent })
+    }).then(function () {
+      toast('已撤销：' + item.label);
+      return loadLocations();
+    }).then(function () {
+      if (state.selId && node(state.selId)) selectPlanNode(state.selId);
+      paintUndo();
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  $('plan-undo').addEventListener('click', undoLast);
+  $('ed-undo').addEventListener('click', undoLast);
+
+  /* ---------- 微调（每按一次 1 格） ---------- */
+
+  function applyBox(n, next, label) {
+    pushUndo(n, label);
+    n.box = next;
+    paintPlan();
+    $('ed-w').value = Math.round(next.w);
+    $('ed-h').value = Math.round(next.h);
+    api('/api/locations/' + encodeURIComponent(n.id), {
+      method: 'PUT', body: JSON.stringify({ box: next })
+    }).then(function () {
+      return loadLocations();
+    }).then(function () {
+      if (state.selId && node(state.selId)) selectPlanNode(state.selId);
+    }).catch(function (err) { toast(err.message); });
+  }
+
+  $('ed-nudge').addEventListener('click', function (e) {
+    var n = node(state.selId);
+    if (!n || !n.box) return;
+    var mv = e.target.closest('[data-move]');
+    var sz = e.target.closest('[data-size]');
+    if (!mv && !sz) return;
+    var d = (mv ? mv.dataset.move : sz.dataset.size).split(',').map(Number);
+    var b = n.box;
+    var next = mv
+      ? { x: clamp(b.x + d[0], 0, VB.w - b.w), y: clamp(b.y + d[1], 0, VB.h - b.h), w: b.w, h: b.h }
+      : { x: b.x, y: b.y, w: clamp(b.w + d[0], 2, VB.w - b.x), h: clamp(b.h + d[1], 2, VB.h - b.y) };
+    if (next.x === b.x && next.y === b.y && next.w === b.w && next.h === b.h) return;
+    applyBox(n, next, mv ? '挪位置' : '改尺寸');
+  });
+
   $('ed-save').addEventListener('click', function () {
     var n = node(state.selId);
     if (!n) return;
@@ -1340,6 +1449,8 @@
     this.classList.toggle('is-on', state.editMode);
     this.textContent = state.editMode ? '完成编辑' : '编辑户型';
     $('plan-tools').hidden = !state.editMode;
+    // 编辑时把画布的 touch-action 关掉，否则拖家具会被页面滚动抢走一半手势
+    $('map-home').classList.toggle('editing', state.editMode);
     if (!state.editMode) {
       $('scale-row').hidden = true;
       hideEditor();

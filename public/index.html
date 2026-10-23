@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=14" />
+<link rel="stylesheet" href="style.css?v=16" />
 </head>
 <body>
 
@@ -82,6 +82,7 @@
             <button type="button" id="add-room" class="mini">+ 加房间</button>
             <button type="button" id="add-furniture" class="mini">+ 加家具</button>
             <button type="button" id="plan-scale" class="mini">户型尺寸</button>
+            <button type="button" id="plan-undo" class="mini" disabled>撤销</button>
           </div>
 
           <div id="scale-row" class="scale-row" hidden>
@@ -117,12 +118,30 @@
                 <input id="ed-h" type="number" min="2" max="88" step="1" />
               </label>
             </div>
+            <!-- 手机上拖拽不精确，这里给可点按的微调 -->
+            <div class="nudge" id="ed-nudge">
+              <p class="nudge-title">微调位置<span class="nudge-hint">每按一次 1 格</span></p>
+              <div class="nudge-pad">
+                <button type="button" class="nudge-btn" data-move="0,-1" aria-label="上移">↑</button>
+                <button type="button" class="nudge-btn" data-move="-1,0" aria-label="左移">←</button>
+                <button type="button" class="nudge-btn" data-move="1,0" aria-label="右移">→</button>
+                <button type="button" class="nudge-btn" data-move="0,1" aria-label="下移">↓</button>
+              </div>
+              <div class="nudge-size">
+                <button type="button" class="mini" data-size="-1,0">宽 −</button>
+                <button type="button" class="mini" data-size="1,0">宽 +</button>
+                <button type="button" class="mini" data-size="0,-1">高 −</button>
+                <button type="button" class="mini" data-size="0,1">高 +</button>
+              </div>
+            </div>
+
             <div class="field" id="ed-parent-row">
               <span class="label-text">属于哪个位置</span>
               <select id="ed-parent"></select>
             </div>
             <p class="ed-meta" id="ed-meta"></p>
             <div class="actions">
+              <button type="button" id="ed-undo" class="ghost" disabled>撤销</button>
               <button type="button" id="ed-save" class="primary">保存修改</button>
               <button type="button" id="ed-cancel" class="ghost">取消选中</button>
             </div>
@@ -751,6 +770,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=14"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

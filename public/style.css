@@ -1,12 +1,15 @@
 :root {
-  --bg: #f7f4ee;
-  --card: #ffffff;
-  --ink: #2c2721;
-  --ink-soft: #6b6357;
-  --ink-faint: #9a9184;
-  --line: #e6e0d4;
-  --accent: #b4531f;
-  --accent-soft: #fbeee5;
+  /* 暖木陶土：背景偏奶油、卡片近白、主色是陶土橙 */
+  --bg: #faf6ef;
+  --card: #fffdf9;
+  --surface: #f3ede3;
+  --ink: #3a2e24;
+  --ink-soft: #7e6e5c;
+  --ink-faint: #a99a87;
+  --line: #eae0cf;
+  --accent: #b4633a;
+  --accent-deep: #8e4a29;
+  --accent-soft: #f7e9df;
   --ok: #2f6b3f;
   --danger: #a3312a;
   --radius: 14px;
@@ -223,6 +226,8 @@ html, body {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 18px;
+  /* 暖木调的层次：卡片比底色亮一档，靠极淡的投影浮起来，而不是靠边框对比 */
+  box-shadow: 0 1px 2px rgba(58, 46, 36, .04), 0 6px 18px -12px rgba(58, 46, 36, .18);
 }
 
 .form h2 {
@@ -1919,3 +1924,23 @@ input[type='checkbox'] {
   font-size: 13px; font-family: inherit; cursor: pointer;
   box-shadow: 0 2px 10px rgba(60, 47, 34, .18);
 }
+
+/* ---------- 手机端户型微调 ---------- */
+
+.nudge { margin: 2px 0 12px; }
+.nudge-title {
+  margin: 0 0 6px; font-size: 13px; font-weight: 500; color: var(--ink-soft);
+}
+.nudge-hint { margin-left: 6px; font-size: 11px; font-weight: 400; color: var(--ink-faint); }
+.nudge-pad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 6px; }
+.nudge-btn {
+  padding: 11px 0; font-size: 16px; line-height: 1; font-family: inherit;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--card); color: var(--ink); cursor: pointer;
+}
+.nudge-btn:active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-deep); }
+.nudge-size { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.nudge-size .mini { padding: 8px 0; }
+
+/* 编辑户型时，画布吃掉手势，避免拖家具变成滚页面 */
+#map-home.editing #floorplan { touch-action: none; }
