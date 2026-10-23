@@ -71,7 +71,8 @@ $env:HOST="0.0.0.0"; node server.js
 node -v
 ```
 
-**必须是 v16 以上。** 这里有个坑：Debian 旧版本（bullseye）用 `apt install nodejs` 装出来的是 v12，跑不起来。
+**必须是 v22.13 以上。** 这是 v2 的硬门槛：数据库用的是 Node 内置的 `node:sqlite`，22.13 之前要么没这个模块、要么还得加 `--experimental-sqlite` 才能用。
+这里有两个坑：Debian 旧版本（bullseye）用 `apt install nodejs` 装出来的是 v12；就算比较新的源，默认也常常是 v18/v20 —— 都不够。
 
 够新就直接装：
 
@@ -85,7 +86,7 @@ sudo apt install -y nodejs
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
 sudo apt install -y nodejs
-node -v   # 应该是 v20.x 之类的
+node -v   # 必须是 v22.13 以上，v22.x 或 v24.x 都行
 ```
 
 ### 2. 把代码放上去
@@ -164,6 +165,10 @@ sudo systemctl stop homebox        # 停掉
 ```
 
 ### 升级
+
+> **从 v1 升到 v2 之前，先确认 `node -v` ≥ 22.13。** 否则升级完会直接起不来（`Cannot find module 'node:sqlite'`）。
+> 升级后第一次启动会**自动把 `data/db.json` 迁进 `data/homebox.db`**：原文件改名为 `db.json.migrated` 留档，另在 `data/backup/` 存一份。迁移有 8 条校验，不过就回滚，不会半途留下一份坏库。
+> 想先看看会发生什么，可以只跑 `npm run migrate`（它只迁移、不启动服务，会打印验收报告）。
 
 代码更新不会影响你的数据（数据在 `data/` 里，不在版本库里）：
 
