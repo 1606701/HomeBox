@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=10" />
+<link rel="stylesheet" href="style.css?v=11" />
 </head>
 <body>
 
@@ -623,6 +623,10 @@
           <input type="checkbox" id="s-ai-enabled" />
           <span>启用拍照识别</span>
         </label>
+        <p class="ai-off-hint" id="s-ai-off-hint" hidden>
+          Key 已经存好了，但识别还是关的 —— 录入页不会出现按钮。
+          <button type="button" class="mini" id="s-ai-enable-now">现在启用</button>
+        </p>
 
         <div class="field">
           <span class="label-text">服务商</span>
@@ -741,6 +745,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=10"></script>
+<script src="app.js?v=11"></script>
 </body>
 </html>

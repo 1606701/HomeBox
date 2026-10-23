@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v10';
+  var APP_VERSION = 'v11';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -2399,7 +2399,15 @@
     var keyEl = $('s-ai-key');
     keyEl.value = '';
     keyEl.placeholder = ai.hasKey ? '已保存，留空表示不修改' : '粘贴 API Key';
+    // 配了 Key 却忘了开开关 —— 这是最容易让人以为「功能没生效」的一步
+    var offHint = $('s-ai-off-hint');
+    if (offHint) offHint.hidden = !(ai.hasKey && !ai.enabled);
   }
+
+  $('s-ai-enable-now').addEventListener('click', function () {
+    $('s-ai-enabled').checked = true;
+    $('s-ai-save').click();
+  });
 
   $('s-ai-preset').addEventListener('change', function () {
     var p = AI_PRESETS[this.value];
@@ -2428,7 +2436,8 @@
         paintNotifySettings(data.settings);
         refreshAiStatus();
         showMsg('s-ai-msg', '已保存', false);
-        toast('识别设置已保存');
+        // 保存了但没开开关，是最容易让人以为「没生效」的地方，必须说清楚
+        toast(payload.ai.enabled ? '识别已启用，去「记一件」看看' : '已保存，但识别仍是关闭状态');
       })
       .catch(function (err) {
         showMsg('s-ai-msg', err.message, true);

@@ -1901,3 +1901,11 @@ input[type='checkbox'] {
   border: 1px solid #e2d8c4; border-radius: 10px; background: #faf5e9;
 }
 .import-confirm .hint { margin: 0 0 10px; }
+
+/* 「Key 存了但开关没开」的提示条 */
+.ai-off-hint {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 10px 0 0; padding: 10px 12px;
+  border: 1px solid #ecd9a8; border-radius: 10px;
+  background: #fdf3d9; color: #7a5b18; font-size: 13px; line-height: 1.5;
+}
