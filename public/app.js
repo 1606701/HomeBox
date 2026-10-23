@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v16';
+  var APP_VERSION = 'v17';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -318,7 +318,21 @@
 
     if (isItem) {
       if (draft.category && $('f-category')) $('f-category').value = draft.category;
+      if (draft.category === '衣物') {
+        // 识别出是衣服，就把类型和颜色一起填好 —— 这是「拍一张就能进衣柜」的关键
+        if (draft.wearType) $('f-weartype').value = draft.wearType;
+        syncWearType();
+        if (draft.colors && draft.colors.length) setColorChips(draft.colors);
+      }
       if (draft.tags && draft.tags.length) $('f-tags').value = draft.tags.join(',');
+    } else if (draft.wearType || (draft.colors && draft.colors.length)) {
+      // 衣柜的「添一件」表单：只填类型和颜色
+      if (draft.wearType) $('g-type').value = draft.wearType;
+      if (draft.colors && draft.colors.length) {
+        Array.prototype.forEach.call($('g-colors').querySelectorAll('.tgl'), function (b) {
+          b.classList.toggle('is-on', draft.colors.indexOf(b.dataset.color) !== -1);
+        });
+      }
     }
     if (draft.locationName) {
       var sel = isItem ? $('f-loc') : $('g-loc');
@@ -328,6 +342,20 @@
           break;
         }
       }
+    }
+
+    // 类型和颜色都在折叠区里，识别完不展开的话等于「填了你也不知道」
+    if (isItem && draft.category === '衣物') {
+      var bits = ['衣物'];
+      WEAR_TYPES_UI.forEach(function (t) {
+        if (t.k === draft.wearType) bits.push(t.n);
+      });
+      if (draft.colors && draft.colors.length) {
+        bits.push(draft.colors.map(colorName).join(' + '));
+      }
+      if ($('f-more')) $('f-more').open = true;
+      toast('已填好：' + bits.join(' · ') + '，确认后保存');
+      return;
     }
     toast('认出来了，看看对不对再保存');
   }
@@ -1614,7 +1642,23 @@
     { k: 'dress', n: '连衣裙' }, { k: 'shoes', n: '鞋' }, { k: 'accessory', n: '配饰' }
   ];
 
-  // 类目选「衣物」才显示衣物类型；选了才会进衣柜
+  var MAX_COLORS = 3;
+
+  // 把识别/编辑里的颜色键映射到色块上
+  function setColorChips(keys) {
+    var box = $('f-colors');
+    if (!box) return;
+    var want = keys || [];
+    Array.prototype.forEach.call(box.querySelectorAll('.tgl'), function (b) {
+      b.classList.toggle('is-on', want.indexOf(b.dataset.color) !== -1);
+    });
+  }
+
+  function pickedColors() {
+    return toggleVals($('f-colors'), 'color');
+  }
+
+  // 类目选「衣物」才显示衣物类型和颜色；选了才会进衣柜
   function syncWearType() {
     var row = $('f-weartype-row');
     if (!row) return;
@@ -1624,8 +1668,17 @@
         return '<option value="' + t.k + '">' + t.n + '</option>';
       }).join('');
     }
+    var box = $('f-colors');
+    if (box && !box.children.length) {
+      box.innerHTML = Object.keys(COLOR_MAP).map(function (k) {
+        return '<button type="button" class="tgl" data-color="' + esc(k) + '">' +
+          '<span class="cdot" style="background:' + COLOR_MAP[k].hex + '"></span>' +
+          esc(COLOR_MAP[k].n) + '</button>';
+      }).join('');
+    }
     var on = !!$('f-category') && $('f-category').value === '衣物';
     row.hidden = !on;
+    $('f-colors-row').hidden = !on;
   }
 
   // 「借给谁」只有状态是「借出了」才显示，否则留着只会让人困惑
@@ -1643,6 +1696,7 @@
     if ($('f-buydate')) $('f-buydate').value = '';
     if ($('f-category')) $('f-category').value = '';
     if ($('f-weartype')) $('f-weartype').value = 'top';
+    setColorChips([]);
     if ($('f-state')) $('f-state').value = 'in_use';
     if ($('f-expire')) $('f-expire').value = '';
     if ($('f-remind')) $('f-remind').value = '';
@@ -1697,6 +1751,7 @@
     $('f-state').value = item.state || 'in_use';
     if (item.wear && item.wear.type) $('f-weartype').value = item.wear.type;
     syncWearType();
+    setColorChips(item.wear && item.wear.colors ? item.wear.colors : []);
     $('f-expire').value = item.expireAt || '';
     $('f-remind').value = item.remindDays == null ? '' : item.remindDays;
     $('f-minqty').value = item.minQty == null ? '' : item.minQty;
@@ -1795,8 +1850,9 @@
       expireAt: $('f-expire').value || null,
       remindDays: $('f-remind').value === '' ? null : Number($('f-remind').value),
       minQty: $('f-minqty').value === '' ? null : Number($('f-minqty').value),
-      // 类目是衣物时，把这个类型交给服务端生成 wear，衣柜才看得到
+      // 类目是衣物时，把类型与颜色交给服务端生成 wear，衣柜才看得到
       wearType: $('f-category').value === '衣物' ? ($('f-weartype').value || 'top') : null,
+      wearColors: $('f-category').value === '衣物' ? pickedColors() : null,
       lendTo: $('f-state').value === 'lent' ? ($('f-lendto').value.trim() || null) : null
     };
     if (!payload.name) { toast('总得有个名字吧'); return; }
@@ -2173,6 +2229,17 @@
   }
   bindToggleSet('g-seasons');
   bindToggleSet('g-colors');
+
+  // 颜色最多 3 个：点第 4 个时把它弹回去，不静默丢弃
+  $('f-colors').addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.tgl') : null;
+    if (!b || !b.classList.contains('is-on')) return;
+    var on = pickedColors();
+    if (on.length > MAX_COLORS) {
+      b.classList.remove('is-on');
+      toast('颜色最多选 ' + MAX_COLORS + ' 个');
+    }
+  });
 
   function toggleVals(box, key) {
     return Array.prototype.map.call(box.querySelectorAll('.tgl.is-on'), function (b) {

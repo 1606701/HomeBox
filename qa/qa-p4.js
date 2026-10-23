@@ -143,6 +143,34 @@ async function main() {
     JSON.stringify(ok.json.draft));
   check('标签保留', JSON.stringify(ok.json.draft.tags) === '["备用"]', JSON.stringify(ok.json.draft));
 
+  // 3b. 识别出衣物时，类型与颜色要一起回来（v17 新增）
+  mockReply = '{"name":"深灰直筒裤","category":"衣物","wearType":"bottom","colors":["深灰","灰","不存在的颜色"],"tags":[],"location":null,"confident":0.9}';
+  const wear = await req(base, 'POST', '/api/vision/recognize',
+    { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  check('衣物识别返回 wearType', wear.json.draft.wearType === 'bottom',
+    JSON.stringify(wear.json.draft));
+  check('颜色收敛去重（深灰/灰 → gray）',
+    JSON.stringify(wear.json.draft.colors) === '["gray"]', JSON.stringify(wear.json.draft.colors));
+  check('名称保留颜色修饰', /深灰/.test(wear.json.draft.name), wear.json.draft.name);
+
+  // 3c. 非衣物不带衣物属性
+  mockReply = '{"name":"十字螺丝刀","category":"工具","wearType":"top","colors":["红"],"tags":[]}';
+  const tool = await req(base, 'POST', '/api/vision/recognize',
+    { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  check('非衣物清空 wearType', tool.json.draft.wearType === null, JSON.stringify(tool.json.draft));
+  check('非衣物清空 colors', Array.isArray(tool.json.draft.colors) && tool.json.draft.colors.length === 0,
+    JSON.stringify(tool.json.draft.colors));
+
+  // 3d. 建物品时把类型和颜色写进 wear
+  const made = await req(base, 'POST', '/api/items', {
+    cookie,
+    body: { name: '深灰直筒裤', category: '衣物', wearType: 'bottom', wearColors: ['深灰', '黑'] }
+  });
+  check('新建衣物的 wear.type', made.json.item.wear && made.json.item.wear.type === 'bottom',
+    JSON.stringify(made.json.item.wear));
+  check('新建衣物的 wear.colors', JSON.stringify(made.json.item.wear.colors) === '["gray","black"]',
+    JSON.stringify(made.json.item.wear.colors));
+
   // 4. 模型返回垃圾
   mockReply = '我觉得这是个东西，无法判断。';
   const bad = await req(base, 'POST', '/api/vision/recognize',

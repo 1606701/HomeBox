@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=16" />
+<link rel="stylesheet" href="style.css?v=17" />
 </head>
 <body>
 
@@ -412,6 +412,11 @@
               <select id="f-weartype"></select>
             </label>
 
+            <div class="field" id="f-colors-row" hidden>
+              <span class="label-text">颜色<span class="label-opt">最多选 3 个，衣柜能按颜色找</span></span>
+              <div class="toggle-set colors" id="f-colors"></div>
+            </div>
+
             <label class="field">
               <span class="label-text">过期日期<span class="label-opt">选填，食品、药品用得上</span></span>
               <input id="f-expire" type="date" />
@@ -770,6 +775,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=16"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>
