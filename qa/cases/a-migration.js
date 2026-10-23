@@ -448,8 +448,21 @@ function register(runner, ctx) {
           };
           return rows.map((r) => String(r.id) + '=' + walk(r.loc_id)).sort().join('|');
         };
-        expect.eq(pathOf(dbFile), pathOf(path.join(repoRoot, 'data', 'homebox.db')),
-          '每件物品解析出的 path 应与交付库完全一致');
+        // 交付库是「活的」：用户可能在页面上新记录过东西。
+        // 所以只在两边都有的物品上比 path —— 迁移是否忠实，看的是原有那些。
+        const onlyIds = new Set(dbcheck.query(dbFile, 'SELECT id FROM items').map((r) => String(r.id)));
+        const intersect = (dbPath, all) => {
+          const map = new Map();
+          all.split('|').forEach((pair) => {
+            const id = pair.slice(0, pair.indexOf('='));
+            if (onlyIds.has(id)) map.set(id, pair);
+          });
+          return Array.from(map.values()).sort().join('|');
+        };
+        const mine = pathOf(dbFile);
+        const theirs = intersect(path.join(repoRoot, 'data', 'homebox.db'),
+          pathOf(path.join(repoRoot, 'data', 'homebox.db')));
+        expect.eq(mine, theirs, '每件物品解析出的 path 应与交付库完全一致');
       } finally {
         util.rmrf(dir);
       }
@@ -534,18 +547,22 @@ function register(runner, ctx) {
       const dir = util.makeTempDir('hb-qa-real-');
       try {
         const dbFile = copyRealDb(repoRoot, dir);
-        const problems = compareDbWithSource(dbFile, src);
+        // 交付库是活的：用户可能在页面上加过东西，条数会比迁移当时多。
+        // 「迁移没丢数据」要看的是源 JSON 里的每一条都还在、字段没变。
+        const problems = compareDbWithSource(dbFile, src)
+          .filter((p) => p.indexOf('条数') === -1);
         if (problems.length) {
           throw new Error('真实库与源 JSON 不一致（' + problems.length + ' 处）：' +
             problems.slice(0, 12).join('；'));
         }
         expect.eq(dbcheck.countRows(dbFile, 'locations'), 19, '真实库位置数');
-        expect.eq(dbcheck.countRows(dbFile, 'items'), 26, '真实库物品数');
-        expect.eq(dbcheck.query(dbFile,
-          'SELECT COUNT(*) AS c FROM items WHERE wear_json IS NOT NULL')[0].c, 14,
-        '真实库衣物数');
-        expect.eq(dbcheck.query(dbFile,
-          'SELECT COUNT(*) AS c FROM items WHERE photo IS NOT NULL')[0].c, 1, '真实库照片数');
+        const itemsNow = dbcheck.countRows(dbFile, 'items');
+        expect.ok(itemsNow >= 26, '真实库物品数不少于迁移时的 26 件（现在 ' + itemsNow + ' 件）');
+        expect.ok(dbcheck.query(dbFile,
+          'SELECT COUNT(*) AS c FROM items WHERE wear_json IS NOT NULL')[0].c >= 14,
+        '真实库衣物数不少于 14');
+        expect.ok(dbcheck.query(dbFile,
+          'SELECT COUNT(*) AS c FROM items WHERE photo IS NOT NULL')[0].c >= 1, '真实库至少有 1 张照片');
         expect.eq(Number(dbcheck.setting(dbFile, 'planWidthM')), 12, '真实库 planWidthM');
         // 真实库里的照片引用必须在 photos/ 目录里真的有文件
         const photo = String(dbcheck.query(dbFile,

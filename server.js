@@ -29,6 +29,8 @@ const reminders = require('./lib/repo/reminders');
 const notifySettings = require('./lib/repo/settings');
 const mailer = require('./lib/mailer');
 const backup = require('./lib/backup');
+const vision = require('./lib/vision');
+const importer = require('./lib/importer');
 const scheduler = require('./lib/scheduler');
 const util = require('./lib/util');
 
@@ -338,6 +340,71 @@ async function handleApi(req, res, pathname, query) {
     const body = await web.readBody(req);
     const dir = String(body.dir || '').trim();
     return web.sendJSON(res, 200, Object.assign({ ok: true }, backup.probeDir(dir)));
+  }
+
+  /* ---------- 拍照识别 ---------- */
+
+  // 任何身份都能问「能不能识别」：前端据此决定渲不渲染拍照按钮。
+  // 没启用时不是「点了报错」，而是按钮根本不存在。
+  if (pathname === '/api/ai/status' && req.method === 'GET') {
+    const cfg = notifySettings.raw().ai;
+    return web.sendJSON(res, 200, {
+      ok: true,
+      available: notifySettings.aiReady() && roles.can(ctx.role, 'write'),
+      enabled: !!cfg.enabled,
+      model: cfg.model,
+      preset: cfg.preset
+    });
+  }
+
+  if (pathname === '/api/vision/recognize' && req.method === 'POST') {
+    if (!notifySettings.aiReady()) {
+      return web.sendJSON(res, 404, { ok: false, error: '没有启用拍照识别' });
+    }
+    if (!guard(res, ctx, 'write')) return;
+    const body = await web.readBody(req, web.MAX_PHOTO_BODY);
+    const out = await vision.recognize(body.image || body.data, notifySettings.raw().ai);
+    if (!out.ok && out.error) {
+      return web.sendJSON(res, 400, { ok: false, error: out.error });
+    }
+    // 失败也是 200：前端只显示一行灰字，绝不打断录入
+    return web.sendJSON(res, 200, out);
+  }
+
+  /* ---------- 导出 / 回灌 ---------- */
+
+  if (pathname === '/api/export' && req.method === 'GET') {
+    if (!guard(res, ctx, 'settings')) return;
+    const doc = backup.buildDocument();
+    const body = JSON.stringify(doc, null, 2);
+    const name = 'homebox-' + reminders.localDate().replace(/-/g, '') + '.json';
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Content-Disposition': 'attachment; filename="' + name + '"',
+      'Cache-Control': 'no-store'
+    });
+    return res.end(body);
+  }
+
+  if (pathname === '/api/import' && req.method === 'POST') {
+    if (!guard(res, ctx, 'settings')) return;
+    const body = await web.readBody(req, web.MAX_PHOTO_BODY);
+    // 破坏性操作：必须显式带 confirm，防止前端误调用
+    if (body.confirm !== 'REPLACE') {
+      return web.sendJSON(res, 400, {
+        ok: false, error: '回灌会整体替换现有数据，需要在请求里带上 confirm="REPLACE"'
+      });
+    }
+    const out = importer.importAll(body.document || body, { dataDir: DATA_DIR });
+    if (out.error) {
+      return web.sendJSON(res, out.error.status, {
+        ok: false, error: out.error.error, backupFile: out.backupFile || null
+      });
+    }
+    return web.sendJSON(res, 200, {
+      ok: true, counts: out.counts, backupFile: out.backupFile
+    });
   }
 
   /* ---------- 位置 ---------- */

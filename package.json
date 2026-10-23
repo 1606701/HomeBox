@@ -10,7 +10,7 @@
     "export": "node --disable-warning=ExperimentalWarning scripts/export.js",
     "smoke": "node --disable-warning=ExperimentalWarning scripts/smoke-test.js",
     "reset-password": "node --disable-warning=ExperimentalWarning scripts/reset-password.js",
-    "qa": "node --disable-warning=ExperimentalWarning qa/qa-p1.js && node --disable-warning=ExperimentalWarning qa/qa-p2.js"
+    "qa": "node --disable-warning=ExperimentalWarning qa/qa-p1.js && node --disable-warning=ExperimentalWarning qa/qa-p2.js && node --disable-warning=ExperimentalWarning qa/qa-p4.js"
   },
   "engines": {
     "node": ">=22.13"

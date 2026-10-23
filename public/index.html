@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=9" />
+<link rel="stylesheet" href="style.css?v=10" />
 </head>
 <body>
 
@@ -237,6 +237,11 @@
             <input id="g-name" placeholder="比如：藏青薄针织衫" autocomplete="off" />
           </label>
 
+          <button type="button" class="ai-shot" id="g-ai-btn" hidden>
+            <span class="ai-ico" aria-hidden="true"></span>拍照识别，自动填好名称
+          </button>
+          <input type="file" id="g-ai-file" accept="image/*" capture="environment" hidden />
+
           <div class="row">
             <label class="field half">
               <span class="label-text">类别</span>
@@ -319,6 +324,11 @@
           <span class="label-text">叫什么</span>
           <input id="f-name" required placeholder="比如：指甲刀" autocomplete="off" />
         </label>
+
+        <button type="button" class="ai-shot" id="f-ai-btn" hidden>
+          <span class="ai-ico" aria-hidden="true"></span>拍照识别，自动填好名称
+        </button>
+        <input type="file" id="f-ai-file" accept="image/*" capture="environment" hidden />
 
         <div class="field">
           <span class="label-text">放在哪</span>
@@ -604,7 +614,66 @@
         </details>
       </div>
 
-      <!-- 卡 4 · 运行状态 -->
+      <!-- 卡 4 · 拍照识别 -->
+      <div class="card set-card">
+        <p class="set-title">拍照识别</p>
+        <p class="set-sub">拍张照，自动填好名称、类目和大概位置。照片会以压缩后的长边 720 发给识别服务，本机不留存、不写日志。</p>
+
+        <label class="switch-row">
+          <input type="checkbox" id="s-ai-enabled" />
+          <span>启用拍照识别</span>
+        </label>
+
+        <div class="field">
+          <span class="label-text">服务商</span>
+          <select id="s-ai-preset">
+            <option value="zhipu">智谱 GLM（有免费档）</option>
+            <option value="qwen">通义千问</option>
+            <option value="custom">自定义（OpenAI 兼容接口）</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="label-text">接口地址</span>
+          <input id="s-ai-baseurl" autocomplete="off" placeholder="https://…/v1" />
+        </div>
+        <div class="field">
+          <span class="label-text">模型</span>
+          <input id="s-ai-model" autocomplete="off" placeholder="glm-4.6v-flash" />
+        </div>
+        <label class="field">
+          <span class="label-text">API Key</span>
+          <input id="s-ai-key" type="password" autocomplete="new-password" />
+        </label>
+        <p class="hint">没启用时，录入页根本不会出现拍照按钮 —— 不是「点了报错」。</p>
+
+        <div class="actions">
+          <button type="button" class="primary" id="s-ai-save">保存</button>
+        </div>
+        <p class="errbox" id="s-ai-msg" hidden></p>
+      </div>
+
+      <!-- 卡 5 · 数据 -->
+      <div class="card set-card">
+        <p class="set-title">数据</p>
+        <p class="set-sub">导出一份完整 JSON（位置、物品、照片文件名都在里面），或者把以前导出的文件灌回来。</p>
+
+        <div class="actions">
+          <button type="button" class="ghost" id="s-export">导出全部数据</button>
+          <button type="button" class="ghost" id="s-import-pick">从文件回灌</button>
+          <input type="file" id="s-import-file" accept="application/json,.json" hidden />
+        </div>
+        <p class="warn-line">回灌会**整体替换**现有数据。动手前系统会自动先备份一份，但请当作不可撤销的操作。</p>
+        <div class="import-confirm" id="s-import-confirm" hidden>
+          <p class="hint" id="s-import-info"></p>
+          <div class="actions">
+            <button type="button" class="primary" id="s-import-do">确认替换</button>
+            <button type="button" class="ghost" id="s-import-cancel">取消</button>
+          </div>
+        </div>
+        <p class="errbox" id="s-data-msg" hidden></p>
+      </div>
+
+      <!-- 卡 6 · 运行状态 -->
       <div class="card set-card">
         <p class="set-title">运行状态</p>
         <div class="set-kv" id="s-job-list">
@@ -671,6 +740,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

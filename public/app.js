@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v9';
+  var APP_VERSION = 'v10';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -214,8 +214,11 @@
      长边 1280 的 JPEG，通常能压到原来的十分之一以下，肉眼看不出差别。 */
 
   var PHOTO_MAX_SIDE = 1280;
+  // 识别上传用的尺寸：720 足够模型看清是什么，token 和流量都省一半
+  var AI_MAX_SIDE = 720;
 
-  function compressImage(file) {
+  function compressImage(file, maxSide) {
+    var limit = maxSide || PHOTO_MAX_SIDE;
     return new Promise(function (resolve, reject) {
       if (!file) { reject(new Error('没读到图片')); return; }
       var looksImage = /^image\//i.test(file.type) ||
@@ -233,7 +236,7 @@
           try {
             var sw = img.naturalWidth || 1;
             var sh = img.naturalHeight || 1;
-            var scale = Math.min(1, PHOTO_MAX_SIDE / Math.max(sw, sh));
+            var scale = Math.min(1, limit / Math.max(sw, sh));
             var w = Math.max(1, Math.round(sw * scale));
             var h = Math.max(1, Math.round(sh * scale));
             var cv = document.createElement('canvas');
@@ -257,6 +260,93 @@
   function photoUrl(file) {
     return file ? '/photos/' + file : '';
   }
+
+  /* ---------- 拍照识别 ----------
+     没启用时按钮不渲染（接口返回 404 / available=false），
+     识别失败只 toast 一行灰字，表单永远能手动填完。 */
+
+  var AI_PRESETS = {
+    zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.6v-flash' },
+    qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-vl-plus' }
+  };
+  var aiBusy = false;
+
+  function refreshAiStatus() {
+    return api('/api/ai/status').then(function (d) {
+      var on = !!(d && d.available);
+      ['f-ai-btn', 'g-ai-btn'].forEach(function (id) {
+        var el = $(id);
+        if (el) el.hidden = !on;
+      });
+    }).catch(function () {
+      ['f-ai-btn', 'g-ai-btn'].forEach(function (id) {
+        var el = $(id);
+        if (el) el.hidden = true;
+      });
+    });
+  }
+
+  // 把模型给的草稿填进表单。只填空字段，不覆盖用户已经打的字。
+  function applyDraft(draft, kind) {
+    var isItem = kind === 'item';
+    var nameEl = isItem ? $('f-name') : $('g-name');
+    if (draft.name) nameEl.value = draft.name;
+
+    if (isItem) {
+      if (draft.category && $('f-category')) $('f-category').value = draft.category;
+      if (draft.tags && draft.tags.length) $('f-tags').value = draft.tags.join(',');
+    }
+    if (draft.locationName) {
+      var sel = isItem ? $('f-loc') : $('g-loc');
+      for (var i = 0; i < sel.options.length; i += 1) {
+        if (sel.options[i].textContent.indexOf(draft.locationName) !== -1) {
+          sel.value = sel.options[i].value;
+          break;
+        }
+      }
+    }
+    toast('认出来了，看看对不对再保存');
+  }
+
+  function runRecognize(file, kind, btn) {
+    if (aiBusy || !file) return;
+    aiBusy = true;
+    var label = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = '正在认…';
+
+    compressImage(file, AI_MAX_SIDE).then(function (out) {
+      return api('/api/vision/recognize', {
+        method: 'POST', body: JSON.stringify({ image: out.dataUrl })
+      });
+    }).then(function (d) {
+      if (d && d.ok && d.draft) {
+        applyDraft(d.draft, kind);
+      } else {
+        // 失败一律「一行灰字」，不弹窗、不阻断
+        toast((d && d.hint) || '没认出来，先手动填吧');
+      }
+    }).catch(function (err) {
+      toast(err.message || '识别不可用，先手动填吧');
+    }).then(function () {
+      aiBusy = false;
+      btn.disabled = false;
+      btn.innerHTML = label;
+    });
+  }
+
+  ['f', 'g'].forEach(function (prefix) {
+    var btn = $(prefix + '-ai-btn');
+    var input = $(prefix + '-ai-file');
+    if (!btn || !input) return;
+    var kind = prefix === 'f' ? 'item' : 'garment';
+    btn.addEventListener('click', function () { input.click(); });
+    input.addEventListener('change', function () {
+      var file = input.files && input.files[0];
+      input.value = '';   // 允许连着选同一张
+      runRecognize(file, kind, btn);
+    });
+  });
 
   function uploadPhoto(id, dataUrl) {
     var base64 = dataUrl.indexOf('base64,') !== -1 ? dataUrl.split('base64,')[1] : dataUrl;
@@ -2299,7 +2389,117 @@
     var b = s.backup || {};
     $('s-backup-dir').value = b.dir || '';
     $('s-backup-warn').hidden = !!b.dir;
+
+    var ai = s.ai || {};
+    $('s-ai-enabled').checked = !!ai.enabled;
+    $('s-ai-preset').value = ai.preset || 'custom';
+    $('s-ai-baseurl').value = ai.baseUrl || '';
+    $('s-ai-model').value = ai.model || '';
+    // Key 同样只进不出：有值就换个占位提示，输入框永远清空
+    var keyEl = $('s-ai-key');
+    keyEl.value = '';
+    keyEl.placeholder = ai.hasKey ? '已保存，留空表示不修改' : '粘贴 API Key';
   }
+
+  $('s-ai-preset').addEventListener('change', function () {
+    var p = AI_PRESETS[this.value];
+    if (p) {
+      $('s-ai-baseurl').value = p.baseUrl;
+      $('s-ai-model').value = p.model;
+    }
+  });
+
+  $('s-ai-save').addEventListener('click', function () {
+    var btn = this;
+    var payload = {
+      ai: {
+        enabled: $('s-ai-enabled').checked,
+        preset: $('s-ai-preset').value,
+        baseUrl: $('s-ai-baseurl').value.trim(),
+        model: $('s-ai-model').value.trim()
+      }
+    };
+    var key = $('s-ai-key').value.trim();
+    if (key) payload.ai.apiKey = key;
+    btn.disabled = true;
+    api('/api/notify/settings', { method: 'PUT', body: JSON.stringify(payload) })
+      .then(function (data) {
+        $('s-ai-key').value = '';
+        paintNotifySettings(data.settings);
+        refreshAiStatus();
+        showMsg('s-ai-msg', '已保存', false);
+        toast('识别设置已保存');
+      })
+      .catch(function (err) {
+        showMsg('s-ai-msg', err.message, true);
+      })
+      .then(function () { btn.disabled = false; });
+  });
+
+  /* ---------- 导出 / 回灌 ---------- */
+
+  $('s-export').addEventListener('click', function () {
+    // 用浏览器原生下载：接口带 Content-Disposition，cookie 会自动带上
+    window.location.href = '/api/export';
+  });
+
+  var importDoc = null;
+
+  $('s-import-pick').addEventListener('click', function () {
+    $('s-import-file').click();
+  });
+
+  $('s-import-file').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    this.value = '';
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onerror = function () { showMsg('s-data-msg', '这个文件读不出来', true); };
+    reader.onload = function () {
+      var doc;
+      try {
+        doc = JSON.parse(String(reader.result));
+      } catch (err) {
+        showMsg('s-data-msg', '不是有效的 JSON 文件', true);
+        return;
+      }
+      if (!doc || !Array.isArray(doc.locations) || !Array.isArray(doc.items)) {
+        showMsg('s-data-msg', '这个文件里没有位置和物品，可能不是 HomeBox 导出的', true);
+        return;
+      }
+      importDoc = doc;
+      $('s-data-msg').hidden = true;
+      $('s-import-info').textContent = '文件里有 ' + doc.locations.length + ' 个位置、' +
+        doc.items.length + ' 件物品。确认后会**整体替换**现在的数据。';
+      $('s-import-confirm').hidden = false;
+    };
+    reader.readAsText(file);
+  });
+
+  $('s-import-cancel').addEventListener('click', function () {
+    importDoc = null;
+    $('s-import-confirm').hidden = true;
+  });
+
+  $('s-import-do').addEventListener('click', function () {
+    if (!importDoc) return;
+    var btn = this;
+    btn.disabled = true;
+    api('/api/import', {
+      method: 'POST',
+      body: JSON.stringify({ document: importDoc, confirm: 'REPLACE' })
+    }).then(function (data) {
+      importDoc = null;
+      $('s-import-confirm').hidden = true;
+      toast('已回灌：' + data.counts.locations + ' 个位置、' + data.counts.items + ' 件物品');
+      // 数据整体换了，位置下拉、列表、提醒、统计都要重来
+      Promise.all([loadLocations(), doSearch(), loadReminders(), loadStats()])
+        .then(function () { renderFormSelects(); })
+        .catch(function () { /* 刷新失败不影响回灌结果 */ });
+    }).catch(function (err) {
+      showMsg('s-data-msg', err.message, true);
+    }).then(function () { btn.disabled = false; });
+  });
 
   $('s-mail-preset').addEventListener('change', function () {
     var p = MAIL_PRESETS[this.value];
@@ -2607,6 +2807,8 @@
     renderRoleOptions();
     // 红点要在开机时就出现，不能等用户点进提醒页才算
     loadReminders().catch(function () { /* 提醒拉不到不影响别的功能 */ });
+    // 识别按钮的显隐由服务端决定：没配 Key 就根本不出按钮
+    refreshAiStatus();
     return Promise.all([loadLocations(), doSearch(), loadStats()]).catch(function (err) {
       console.error(err);
       toast('加载失败：' + err.message);
