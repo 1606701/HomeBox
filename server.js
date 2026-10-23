@@ -25,6 +25,11 @@ const locations = require('./lib/repo/locations');
 const items = require('./lib/repo/items');
 const members = require('./lib/repo/members');
 const stats = require('./lib/repo/stats');
+const reminders = require('./lib/repo/reminders');
+const notifySettings = require('./lib/repo/settings');
+const mailer = require('./lib/mailer');
+const backup = require('./lib/backup');
+const scheduler = require('./lib/scheduler');
 const util = require('./lib/util');
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -245,6 +250,96 @@ async function handleApi(req, res, pathname, query) {
     return web.sendJSON(res, 200, Object.assign({ ok: true }, stats.value({ by })));
   }
 
+  /* ---------- 提醒 ---------- */
+
+  if (pathname === '/api/reminders' && req.method === 'GET') {
+    const out = reminders.compute();
+    return web.sendJSON(res, 200, {
+      ok: true,
+      today: out.today,
+      counts: out.counts,
+      groups: out.groups,
+      kinds: notifySettings.raw().kinds,
+      labels: mailer.KIND_LABEL
+    });
+  }
+
+  const ackMatch = pathname.match(/^\/api\/reminders\/([^/]+)\/([^/]+)\/ack$/);
+  if (ackMatch && req.method === 'POST') {
+    if (!guard(res, ctx, 'write')) return;
+    const body = await web.readBody(req);
+    const out = reminders.ack(decodeURIComponent(ackMatch[1]),
+      decodeURIComponent(ackMatch[2]), String(body.action || 'done'));
+    if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+    return web.sendJSON(res, 200, { ok: true });
+  }
+
+  /* ---------- 通知设置与运维 ---------- */
+
+  if (pathname === '/api/notify/settings') {
+    if (!guard(res, ctx, 'settings')) return;
+    if (req.method === 'GET') {
+      return web.sendJSON(res, 200, { ok: true, settings: notifySettings.publicView() });
+    }
+    if (req.method === 'PUT') {
+      const body = await web.readBody(req);
+      const out = notifySettings.save(body);
+      if (out.error) return web.sendJSON(res, out.error.status, { ok: false, error: out.error.error });
+      return web.sendJSON(res, 200, { ok: true, settings: out.settings });
+    }
+  }
+
+  // 发测试邮件：同步等 SMTP 结果，把原始错误直接回给用户
+  if (pathname === '/api/notify/test' && req.method === 'POST') {
+    if (!guard(res, ctx, 'settings')) return;
+    const out = await mailer.sendNow({
+      subject: 'HomeBox 测试邮件',
+      text: '收到这封说明配置成功了。以后每天会把快过期、快用完、借出未还的东西汇总成一封发到这里。',
+      html: '<div style="font-family:-apple-system,sans-serif;padding:20px;background:#f7f4ee;' +
+        'border-radius:12px;color:#3c2f22"><h3 style="margin:0 0 8px">配置成功了</h3>' +
+        '<p style="margin:0;color:#8a7a66;font-size:13px">以后每天会把快过期、快用完、' +
+        '借出未还的东西汇总成一封发到这里。</p></div>'
+    });
+    if (!out.ok) return web.sendJSON(res, 400, { ok: false, error: out.error });
+    return web.sendJSON(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/jobs/status' && req.method === 'GET') {
+    if (!guard(res, ctx, 'settings')) return;
+    return web.sendJSON(res, 200, Object.assign({ ok: true }, scheduler.status()));
+  }
+
+  if (pathname === '/api/jobs/run' && req.method === 'POST') {
+    if (!guard(res, ctx, 'settings')) return;
+    const body = await web.readBody(req);
+    const job = String(body.job || 'daily');
+    const out = await scheduler.runNow(job);
+    return web.sendJSON(res, out.ok ? 200 : 400, { ok: out.ok, detail: out.detail });
+  }
+
+  if (pathname === '/api/backup/status' && req.method === 'GET') {
+    if (!guard(res, ctx, 'settings')) return;
+    return web.sendJSON(res, 200, { ok: true, backup: backup.status(DATA_DIR) });
+  }
+
+  if (pathname === '/api/backup/run' && req.method === 'POST') {
+    if (!guard(res, ctx, 'settings')) return;
+    const out = backup.run({ dataDir: DATA_DIR, reason: 'manual' });
+    return web.sendJSON(res, 200, {
+      ok: true,
+      backup: out,
+      status: backup.status(DATA_DIR)
+    });
+  }
+
+  // 检测备份目录能不能写（设置页那个按钮）
+  if (pathname === '/api/backup/probe' && req.method === 'POST') {
+    if (!guard(res, ctx, 'settings')) return;
+    const body = await web.readBody(req);
+    const dir = String(body.dir || '').trim();
+    return web.sendJSON(res, 200, Object.assign({ ok: true }, backup.probeDir(dir)));
+  }
+
   /* ---------- 位置 ---------- */
 
   if (pathname === '/api/locations') {
@@ -357,6 +452,10 @@ async function handleApi(req, res, pathname, query) {
         category: body.category,
         priceCents: priceArg(body),
         buyDate: body.buyDate,
+        expireAt: body.expireAt,
+        remindDays: body.remindDays,
+        minQty: body.minQty,
+        lendTo: body.lendTo,
         // 没指定归属就记在当前登录人头上（首次使用状态下没有真实成员，留空）
         ownerId: body.ownerId !== undefined ? body.ownerId
           : (ctx.bootstrap ? null : ctx.member.id)
@@ -569,5 +668,9 @@ server.listen(PORT, HOST, () => {
   if (members.count() === 0) {
     console.log('  首次使用：打开页面先创建管理员（也可以先不建，本机全权限）');
   }
+  // 定时任务：每日摘要 + 每日备份。启动即补一次（断电错过的窗口在这里补）
+  scheduler.start({ dataDir: DATA_DIR });
+  console.log('  定时任务：备份 03:00 · 邮件 ' + notifySettings.raw().mail.time +
+    (notifySettings.mailReady() ? '' : '（邮件未配置，只做站内提醒）'));
   console.log('');
 });
