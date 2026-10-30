@@ -13,10 +13,15 @@
 //      跑完对比，有任何变化直接判本次测试无效；
 //   2. 一切写操作发生在 fs.mkdtempSync() 造的临时目录里，结束时一律删掉；
 //   3. 只新增 qa/ 下的文件，不修改 server.js / lib/ / public/ / scripts/。
+//
+// 注：homebox.db-wal / -shm 刻意不参与失败判定 —— 它们由常驻实例掌管，
+// 字节取决于 checkpoint 时机，不是「测试有没有写」的证据（详见 lib/util.js）。
+// 取而代之的是 lib/dbcheck.js 的 logicalCounts() 四项逻辑计数不变式。
 
 const path = require('path');
 
 const util = require('./lib/util');
+const dbcheck = require('./lib/dbcheck');
 const { Runner, fmt } = require('./lib/runner');
 
 /**
@@ -49,20 +54,12 @@ function applyFilter(runner, only) {
 
 /**
  * 真实数据的完整性快照：这些文件在测试期间必须一个字节都不变。
+ * 具体清单见 util.REAL_DATA_FILES（不含 -wal/-shm，理由见 lib/util.js 注释）。
  * @param {string} repoRoot 仓库根
- * @returns {object}
+ * @returns {{files:object, photos:object}}
  */
 function realDataSnapshot(repoRoot) {
-  const files = [
-    path.join(repoRoot, 'data', 'homebox.db'),
-    path.join(repoRoot, 'data', 'homebox.db-wal'),
-    path.join(repoRoot, 'data', 'db.json.migrated'),
-    path.join(repoRoot, 'data', 'db.pre-p1.json.bak')
-  ];
-  const snap = util.snapshotFiles(files);
-  const photos = util.listFiles(path.join(repoRoot, 'data', 'photos')).map((name) =>
-    path.join(repoRoot, 'data', 'photos', name));
-  return { files: snap, photos: util.snapshotFiles(photos) };
+  return util.snapshotRealData(repoRoot);
 }
 
 /**
@@ -102,7 +99,9 @@ function printFindings(findings) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = util.REPO_ROOT;
+  const dataDir = path.join(repoRoot, 'data');
   const before = realDataSnapshot(repoRoot);
+  const countsBefore = dbcheck.logicalCounts(dataDir);
 
   const runner = new Runner('HomeBox v2 P1 数据层迁移 · QA 验收');
   const ctx = { repoRoot, cleanups: [], findings: [] };
@@ -135,9 +134,10 @@ async function main() {
   }
 
   const after = realDataSnapshot(repoRoot);
-  const changedFiles = util.diffSnapshot(before.files, after.files);
-  const changedPhotos = util.diffSnapshot(before.photos, after.photos);
-  const dataClean = !changedFiles.length && !changedPhotos.length;
+  const changed = util.diffRealData(before, after);
+  const countsAfter = dbcheck.logicalCounts(dataDir);
+  const changedCounts = dbcheck.diffCounts(countsBefore, countsAfter);
+  const dataClean = !changed.length && !changedCounts.length;
 
   printFailures(summary.results);
   printFindings(summary.findings);
@@ -150,10 +150,18 @@ async function main() {
     '   失败：' + summary.counts.fail +
     '   跳过：' + summary.counts.skip);
   console.log('耗时：' + (summary.totalMs / 1000).toFixed(1) + ' 秒');
-  console.log('真实数据未被改动：' + (dataClean ? '是（' + Object.keys(before.files).length +
-    ' 个文件 + ' + Object.keys(before.photos).length + ' 张照片 sha256 前后一致）' : '否！'));
-  if (!dataClean) {
-    console.log('  变化的文件：' + changedFiles.concat(changedPhotos).join(', '));
+  console.log('真实数据未被改动：' + (changed.length ? '否！' : '是（' +
+    Object.keys(before.files).length + ' 个文件 + ' +
+    Object.keys(before.photos).length + ' 张照片 sha256 前后一致）'));
+  console.log('真实库逻辑数据未被改动（locations/items/wear/photos 四项计数一致）：' +
+    (changedCounts.length ? '否！变化的字段：' + changedCounts.join(',')
+      : '是（' + dbcheck.describeCounts(countsAfter) + '）'));
+  if (changed.length) {
+    console.log('  变化的文件：' + changed.join(', '));
+  }
+  if (changedCounts.length) {
+    console.log('  计数前后：' + dbcheck.describeCounts(countsBefore) +
+      ' → ' + dbcheck.describeCounts(countsAfter));
   }
   console.log('');
 

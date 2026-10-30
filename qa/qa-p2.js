@@ -19,6 +19,7 @@ const path = require('path');
 const util = require('./lib/util');
 const httpc = require('./lib/httpc');
 const servers = require('./lib/servers');
+const dbcheck = require('./lib/dbcheck');
 
 const REPO = util.REPO_ROOT;
 
@@ -125,16 +126,11 @@ async function main() {
 
   const wanted = (group) => !only || only === group || only.indexOf(group) === 0;
 
-  // 真实数据快照
-  const watchers = [
-    path.join(REPO, 'data', 'homebox.db'),
-    path.join(REPO, 'data', 'homebox.db-wal'),
-    path.join(REPO, 'data', 'db.json.migrated'),
-    path.join(REPO, 'data', 'db.pre-p1.json.bak')
-  ];
-  const photosDir = path.join(REPO, 'data', 'photos');
-  const photoFiles = util.listFiles(photosDir).map((n) => path.join(photosDir, n));
-  const before = util.snapshotFiles(watchers.concat(photoFiles));
+  // 真实数据快照（不含 -wal/-shm：它们由常驻实例掌管，理由见 lib/util.js）
+  const realDataDir = path.join(REPO, 'data');
+  const photosDir = path.join(realDataDir, 'photos');
+  const before = util.snapshotRealData(REPO);
+  const countsBefore = dbcheck.logicalCounts(realDataDir);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hb-p2-'));
   const dataDir = path.join(tmp, 'data');
@@ -411,9 +407,11 @@ async function main() {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (err) { /* 忽略 */ }
   }
 
-  // 真实数据必须一字节未变
-  const after = util.snapshotFiles(watchers.concat(photoFiles));
-  const changed = util.diffSnapshot(before, after);
+  // 真实数据必须一字节未变（WAL 例外，见 lib/util.js），且四项逻辑计数一致
+  const after = util.snapshotRealData(REPO);
+  const changed = util.diffRealData(before, after);
+  const countsAfter = dbcheck.logicalCounts(realDataDir);
+  const changedCounts = dbcheck.diffCounts(countsBefore, countsAfter);
 
   console.log('');
   if (failures.length) {
@@ -426,9 +424,16 @@ async function main() {
   console.log('════════════════════════════════════════');
   console.log('断言数：' + (pass + fail) + '   通过：' + pass + '   失败：' + fail);
   console.log('真实数据未被改动：' + (changed.length ? '否！' + changed.join(',') : '是'));
+  console.log('真实库逻辑数据未被改动（locations/items/wear/photos 四项计数一致）：' +
+    (changedCounts.length ? '否！变化的字段：' + changedCounts.join(',')
+      : '是（' + dbcheck.describeCounts(countsAfter) + '）'));
+  if (changedCounts.length) {
+    console.log('  计数前后：' + dbcheck.describeCounts(countsBefore) +
+      ' → ' + dbcheck.describeCounts(countsAfter));
+  }
   console.log('');
 
-  if (changed.length) return 2;
+  if (changed.length || changedCounts.length) return 2;
   return fail ? 1 : 0;
 }
 

@@ -2,8 +2,11 @@
 
 // QA 测试脚手架：临时目录 / 端口 / 文件快照 / 异步等待
 //
-// 铁律：这里的任何函数都不允许碰仓库里的 data/。
-// 所有读写都发生在 fs.mkdtempSync() 造出来的临时目录里。
+// 铁律：这里没有任何函数会**写**仓库里的 data/。
+// 所有写操作都发生在 fs.mkdtempSync() 造出来的临时目录里。
+//
+// 唯一例外是下面三个 realData* 函数：它们**只读**真实 data/，用来证明
+// 「测试没有写用户数据」。只做 stat / readFile / readdir，一个字节都不落盘。
 
 const fs = require('fs');
 const os = require('os');
@@ -118,6 +121,60 @@ function diffSnapshot(before, after) {
 }
 
 /**
+ * 真实数据里需要「严格字节不变」的文件（相对 data/）。
+ *
+ * 刻意**不含** homebox.db-wal / homebox.db-shm：WAL/SHM 由常驻实例掌管，
+ * 它的字节取决于 checkpoint 时机（lib/scheduler.js 每 60 秒一次 tick 就可能推进），
+ * 与「测试有没有写用户数据」无关。把它们放进失败判定只会制造假阳性。
+ * 真正回答「有没有真动用户数据」的是 dbcheck.logicalCounts() 的四项计数。
+ * @type {string[]}
+ */
+const REAL_DATA_FILES = ['homebox.db', 'db.json.migrated', 'db.pre-p1.json.bak'];
+
+/**
+ * 真实数据文件的绝对路径列表（只读）。
+ * @param {string} repoRoot 仓库根
+ * @returns {string[]}
+ */
+function realDataFiles(repoRoot) {
+  const dir = path.join(repoRoot, 'data');
+  return REAL_DATA_FILES.map((n) => path.join(dir, n));
+}
+
+/**
+ * 真实照片目录下的文件绝对路径列表（只读）。
+ * @param {string} repoRoot 仓库根
+ * @returns {string[]}
+ */
+function realDataPhotoFiles(repoRoot) {
+  const dir = path.join(repoRoot, 'data', 'photos');
+  return listFiles(dir).map((n) => path.join(dir, n));
+}
+
+/**
+ * 给真实数据拍一次快照（只读）。
+ * @param {string} repoRoot 仓库根
+ * @returns {{files:object, photos:object}}
+ */
+function snapshotRealData(repoRoot) {
+  return {
+    files: snapshotFiles(realDataFiles(repoRoot)),
+    photos: snapshotFiles(realDataPhotoFiles(repoRoot))
+  };
+}
+
+/**
+ * 比较两份真实数据快照，返回变化文件列表。
+ * @param {object} before 之前
+ * @param {object} after 之后
+ * @returns {string[]}
+ */
+function diffRealData(before, after) {
+  return diffSnapshot(before.files, after.files)
+    .concat(diffSnapshot(before.photos, after.photos));
+}
+
+/**
  * 拿一个当前空闲的端口。
  * @returns {Promise<number>}
  */
@@ -169,6 +226,7 @@ function once(fn) {
 
 module.exports = {
   REPO_ROOT,
+  REAL_DATA_FILES,
   makeTempDir,
   rmrf,
   copyDir,
@@ -176,6 +234,10 @@ module.exports = {
   sha256File,
   snapshotFiles,
   diffSnapshot,
+  realDataFiles,
+  realDataPhotoFiles,
+  snapshotRealData,
+  diffRealData,
   freePort,
   sleep,
   waitUntil,

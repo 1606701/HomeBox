@@ -15,6 +15,7 @@ const { spawn } = require('child_process');
 
 const REPO = require('./lib/util').REPO_ROOT;
 const util = require('./lib/util');
+const dbcheck = require('./lib/dbcheck');
 let mockReply = '{"name":"五号电池","category":"耗材","tags":["备用"],"location":"厨房","confident":0.8}';
 let mockStatus = 200;
 let mockDelay = 0;
@@ -82,11 +83,12 @@ async function waitPort(base) {
   return false;
 }
 
-const WATCH = ['data/homebox.db', 'data/homebox.db-wal', 'data/db.json.migrated']
-  .map((p) => path.join(REPO, p));
-
+// 真实数据只读校验：严格字节快照 + 四项逻辑计数不变式（清单见 lib/util.js，
+// 刻意不含 homebox.db-wal / -shm —— 它们由常驻实例掌管，字节随 checkpoint 变化）
 async function main() {
-  const before = util.snapshotFiles(WATCH);
+  const realDataDir = path.join(REPO, 'data');
+  const before = util.snapshotRealData(REPO);
+  const countsBefore = dbcheck.logicalCounts(realDataDir);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hb-p4-'));
   const dataDir = path.join(tmp, 'data');
   fs.mkdirSync(dataDir, { recursive: true });
@@ -116,6 +118,20 @@ async function main() {
   const check = (l, c, d) => out.push((c ? 'PASS' : 'FAIL') + '  ' + l + (c ? '' : '  ← ' + (d || '')));
 
   // 1. 未启用
+  //
+  // 这一节必须自己把开关拨到「关」，不能假定真实库里它是关的：
+  // 上面的 fixture 是用户正在使用的 data/homebox.db 的副本，识别开关随时可能
+  // 被用户在设置页打开（实测 preset=zhipu / model=glm-4v-flash / hasKey=true）。
+  // 一旦是开的，下面两条断言就不是「断言」而是「拿用户的真 Key 去打真接口」——
+  // 既必然失败，又会产生一次真实的外网请求。所以先显式关掉，让本节只依赖自己。
+  //
+  // 只关开关、**不清 Key**：这里要验的正是「有 Key 但开关是关的」这个真实场景，
+  // 顺手把 apiKey 清成空会让 aiReady() 因为「没 Key」而 false，
+  // 那样即使 aiReady() 漏判 enabled，断言也照样绿——等于自己把牙齿拔了。
+  const off = await req(base, 'PUT', '/api/notify/settings',
+    { cookie, body: { ai: { enabled: false } } });
+  check('前置：显式关闭识别', off.status === 200 && off.json.ok, JSON.stringify(off.json));
+
   const s1 = await req(base, 'GET', '/api/ai/status', { cookie });
   check('未启用时 available=false', s1.json.available === false, JSON.stringify(s1.json));
   const r1 = await req(base, 'POST', '/api/vision/recognize',
@@ -196,9 +212,15 @@ async function main() {
   mockStatus = 200;
 
   // 7. 导出
+  // 原来断言「至少 26 件」= 把 P1 种子的规模写死。真实库已被用户增删过（现 31 件），
+  // 将来哪天整理到 26 件以下就会无辜报错。改成和列表接口的实际件数对齐：
+  // 导出必须覆盖 /api/items 能看到的全部物品，这才是不依赖真实库规模的不变式。
+  const beforeImport = await req(base, 'GET', '/api/items', { cookie });
   const exp = await req(base, 'GET', '/api/export', { cookie });
-  check('导出成功', exp.status === 200 && exp.json && exp.json.items.length >= 26,
-    String(exp.status));
+  check('导出成功', exp.status === 200 && exp.json &&
+    exp.json.items.length === beforeImport.json.items.length,
+    'export=' + (exp.json && exp.json.items && exp.json.items.length) +
+    ' list=' + beforeImport.json.items.length);
   check('导出带 Content-Disposition', /attachment; filename="homebox-/.test(
     String(exp.headers['content-disposition'])), String(exp.headers['content-disposition']));
 
@@ -218,26 +240,41 @@ async function main() {
   check('回灌前自动备份过', /backup/.test(String(imp.json.backupFile)), String(imp.json.backupFile));
 
   // 9. 访客不能导出
+  // 这里的 available=false 只有在「识别已开启」时才有意义：如果开关是关的，
+  // 访客自然是 false，断言会空转通过、拦的是开关而不是角色。所以同刻也问一次管理员，
+  // 用 admin=true 锚住「此刻拦截确实来自角色」。
   const g = await req(base, 'POST', '/api/members', { cookie, body: { name: '客人', role: 'guest' } });
   const gl = await req(base, 'POST', '/api/auth/login', { body: { memberId: g.json.member.id } });
   const gc = String(gl.headers['set-cookie'][0]).split(';')[0];
   const gexp = await req(base, 'GET', '/api/export', { cookie: gc });
   check('访客不能导出', gexp.status === 403, String(gexp.status));
+  const adminAi = await req(base, 'GET', '/api/ai/status', { cookie });
   const gai = await req(base, 'GET', '/api/ai/status', { cookie: gc });
-  check('访客 available=false', gai.json.available === false, JSON.stringify(gai.json));
+  check('访客 available=false（同刻管理员为 true，证明拦的是角色不是开关）',
+    adminAi.json.available === true && gai.json.available === false,
+    'admin=' + JSON.stringify(adminAi.json) + ' guest=' + JSON.stringify(gai.json));
 
   console.log('\n结果：');
   out.forEach((r) => console.log('  ' + r));
   const fails = out.filter((r) => r.startsWith('FAIL')).length;
   console.log('\n合计 ' + out.length + ' 项，失败 ' + fails + ' 项');
 
-  const changed = util.diffSnapshot(before, util.snapshotFiles(WATCH));
+  const changed = util.diffRealData(before, util.snapshotRealData(REPO));
+  const countsAfter = dbcheck.logicalCounts(realDataDir);
+  const changedCounts = dbcheck.diffCounts(countsBefore, countsAfter);
   console.log('真实数据未被改动：' + (changed.length ? '否！' + changed.join(',') : '是'));
+  console.log('真实库逻辑数据未被改动（locations/items/wear/photos 四项计数一致）：' +
+    (changedCounts.length ? '否！变化的字段：' + changedCounts.join(',')
+      : '是（' + dbcheck.describeCounts(countsAfter) + '）'));
+  if (changedCounts.length) {
+    console.log('  计数前后：' + dbcheck.describeCounts(countsBefore) +
+      ' → ' + dbcheck.describeCounts(countsAfter));
+  }
 
   child.kill('SIGKILL');
   mock.srv.close();
   fs.rmSync(tmp, { recursive: true, force: true });
-  process.exitCode = changed.length ? 2 : (fails ? 1 : 0);
+  process.exitCode = (changed.length || changedCounts.length) ? 2 : (fails ? 1 : 0);
 }
 
 main().catch((e) => {
