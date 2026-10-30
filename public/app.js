@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v17';
+  var APP_VERSION = 'v18';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -1948,6 +1948,54 @@
     return 'background:linear-gradient(135deg,' + list.join(',') + ')';
   }
 
+  /* 衣服名字里还有一批更口语的说法，指向的仍然是 COLOR_MAP 里已有的键。
+     目标键不在 COLOR_MAP 里的条目会被丢掉，所以这张表不可能造出新的颜色。 */
+  var COLOR_EXTRA_ALIASES = [
+    ['藏蓝', 'navy'], ['深蓝', 'blue'], ['浅蓝', 'blue'], ['天蓝', 'blue'], ['宝蓝', 'blue'],
+    ['深灰', 'gray'], ['浅灰', 'gray'], ['银灰', 'gray'],
+    ['咖啡', 'brown'], ['深棕', 'brown'], ['驼', 'khaki'], ['杏', 'beige'],
+    ['米白', 'white'], ['奶白', 'white'], ['雪白', 'white'],
+    ['酒红', 'red'], ['玫红', 'pink'], ['浅粉', 'pink'],
+    ['墨绿', 'green'], ['橄榄绿', 'green'], ['草绿', 'green']
+  ];
+
+  // 基础词直接由 COLOR_MAP 的显示名派生（黑/白/灰/藏青/蓝/牛仔/绿/卡其/米/棕/红/粉/橙/黄/紫），
+  // 再拼上别名表；按词长倒序排——「藏青」必须比单字先匹配上，否则会被拆成两个单字。
+  var COLOR_ALIASES = (function () {
+    var rows = Object.keys(COLOR_MAP).map(function (k) { return [COLOR_MAP[k].n, k]; });
+    COLOR_EXTRA_ALIASES.forEach(function (pair) {
+      if (COLOR_MAP[pair[1]]) rows.push(pair);
+    });
+    return rows.sort(function (a, b) { return b[0].length - a[0].length; });
+  }());
+
+  /**
+   * 只用于显示的取色。添衣服时没选颜色（wear.colors 是空数组）的话，
+   * 缩略图只剩一块灰底、右侧文字是「—」，看起来就像「颜色丢了」。
+   * 这里在渲染那一刻退一步，从衣服名字里认颜色。
+   * 纯兜底：绝不回写 item.wear.colors，保存时仍然以用户选的为准。
+   * @param {object} item API 形状的衣服
+   * @returns {string[]} COLOR_MAP 的键，最多 MAX_COLORS 个
+   */
+  function displayColors(item) {
+    var wear = (item && item.wear) || {};
+    var own = wear.colors || [];
+    if (own.length) return own;                       // 用户选过就原样用，不做二次解释
+    var name = String((item && item.name) || '');
+    var out = [];
+    for (var i = 0; i < name.length && out.length < MAX_COLORS; i += 1) {
+      var hit = null;
+      for (var j = 0; j < COLOR_ALIASES.length; j += 1) {
+        var word = COLOR_ALIASES[j][0];
+        if (name.substr(i, word.length) === word) { hit = COLOR_ALIASES[j]; break; }
+      }
+      if (!hit) continue;
+      if (out.indexOf(hit[1]) === -1) out.push(hit[1]);
+      i += hit[0].length - 1;                         // 整词吃进去，别在同一个词里重复匹配
+    }
+    return out;
+  }
+
   function loadWardrobe() {
     return api('/api/wardrobe').then(function (data) {
       state.wb.loaded = true;
@@ -2002,15 +2050,21 @@
         '<span class="oval">这一类还没有，添一件吧</span></div>';
     }
     var w = item.wear;
+    var colors = displayColors(item);
+    // 和衣物卡片同一套口径：有照片就用照片，没照片才退回到色块
+    var media = item.photo
+      ? '<img class="oswatch is-photo" src="' + esc(photoUrl(item.photo)) + '" loading="lazy"' +
+        ' alt="' + esc(item.name) + '" data-full="' + esc(photoUrl(item.photo)) + '" />'
+      : '<span class="oswatch" style="' + swatchCss(colors) + '"></span>';
     return '<div class="orow">' +
-      '<span class="oswatch" style="' + swatchCss(w.colors) + '"></span>' +
+      media +
       '<span class="obody">' +
         '<span class="orole">' + esc(label) + '</span>' +
         '<span class="oname">' + esc(item.name) + '</span>' +
         '<span class="opath">' + esc(item.path) + '</span>' +
       '</span>' +
       '<span class="oval">' +
-        esc((w.colors || []).map(colorName).join('/') || '—') +
+        esc(colors.map(colorName).join('/') || '—') +
         (w.size ? ' · ' + esc(w.size) : '') +
       '</span>' +
     '</div>';
@@ -2131,7 +2185,7 @@
   function garmentCard(g) {
     var w = g.wear;
     var meta = [typeN(w.type), w.size ? '尺码 ' + w.size : '',
-      (w.colors || []).map(colorName).join('/')].filter(Boolean).join(' · ');
+      displayColors(g).map(colorName).join('/')].filter(Boolean).join(' · ');
     var badge = w.status !== 'ready'
       ? '<span class="gbadge ' + esc(w.status) + '">' + esc(statusN(w.status)) + '</span>'
       : '';
@@ -2144,7 +2198,7 @@
     var media = g.photo
       ? '<img class="gsw is-photo" src="' + esc(photoUrl(g.photo)) + '" loading="lazy"' +
         ' alt="' + esc(g.name) + '" data-full="' + esc(photoUrl(g.photo)) + '" />'
-      : '<span class="gsw" style="' + swatchCss(w.colors) + '"></span>';
+      : '<span class="gsw" style="' + swatchCss(displayColors(g)) + '"></span>';
     var acts = '';
     if (can('write')) {
       acts += '<button type="button" class="mini" data-act="wore" data-id="' + esc(g.id) + '">今天穿了</button>' +
