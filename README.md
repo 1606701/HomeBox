@@ -191,6 +191,44 @@ sudo systemctl restart homebox
 
 这一步不是「防止误删」，而是**防 TF 卡坏掉**——所以「备份到同一张卡上等于没备份」这句话仍然成立。设置页里没填外部目录时，每天那封摘要邮件底部会附上「怎么接 NAS」的三步说明。
 
+### 本机（香橙派）已经接好的 NAS
+
+2026-10-31 配好并实测通过。目标：NAS `192.168.3.180` 的共享「家庭共享」里的 `orangePiBackup` 目录，
+挂到 `/mnt/nas`，HomeBox 设置里的「备份位置」填 `/mnt/nas/orangePiBackup`。
+
+```bash
+# 1) 凭据（root 持有，600；里面只有 username= 和 password= 两行）
+sudo tee /etc/nas.cred >/dev/null <<'EOF'
+username=yangf
+password=<NAS 密码>
+EOF
+sudo chmod 600 /etc/nas.cred
+
+# 2) 挂载点
+sudo mkdir -p /mnt/nas
+
+# 3) /etc/fstab 追加（`nofail` 保证 NAS 不在线也能开机；
+#    `x-systemd.automount` 让首次访问才挂载，不拖慢启动）
+# >>> portal-nas-backup >>>
+//192.168.3.180/家庭共享 /mnt/nas cifs credentials=/etc/nas.cred,uid=1000,gid=1000,iocharset=utf8,nofail,_netdev,x-systemd.automount,x-systemd.idle-timeout=600,vers=3.0 0 0
+# <<< portal-nas-backup <<<
+
+sudo systemctl daemon-reload
+sudo systemctl start mnt-nas.automount     # 生成的单元不能 enable，开机由 remote-fs.target 拉起
+sudo findmnt --verify                       # 校验 fstab，应输出 Success
+```
+
+几个踩过的点：
+
+- 共享名是中文「家庭共享」，`smbclient -L //192.168.3.180 -U 用户名` 能列出来；
+  `orangPibackup` 是共享里的**目录**，实际大小写是 `orangePiBackup`。
+- NAS 只开了 445，139 是关的（正常，现代 SMB 不需要 NetBIOS）。
+- 需要 `cifs-utils`（`mount.cifs`）和 `smbclient`（排查用），`apt install` 即可。
+- `mnt-nas.automount` 是 fstab 生成的**临时单元**，`systemctl enable` 会报
+  `transient or generated` —— 这是正常的，它 `WantedBy=remote-fs.target`，开机会自动起。
+- 备份 JSON **不含**邮件授权码和 AI Key（导出时只带 items / locations / planWidthM / base_currency），
+  所以放到 NAS 上不会泄露凭据。
+
 手工备份的做法仍然保留：
 
 数据在 `data/` 目录里：`homebox.db`（SQLite）+ `photos/`（照片文件）。
