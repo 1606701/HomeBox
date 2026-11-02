@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v18';
+  var APP_VERSION = 'v19';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -294,19 +294,106 @@
     qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-vl-plus' }
   };
   var aiBusy = false;
+  var aiOn = false;      // 识别开关状态，拍标签按钮也要看它
+  var lastScannedDate = null;  // 上一次拍标签填进去的日期，用来判断「这行字还配不配得上」
 
   function refreshAiStatus() {
     return api('/api/ai/status').then(function (d) {
-      var on = !!(d && d.available);
+      aiOn = !!(d && d.available);
       ['f-ai-btn', 'g-ai-btn'].forEach(function (id) {
         var el = $(id);
-        if (el) el.hidden = !on;
+        if (el) el.hidden = !aiOn;
       });
+      syncExpireBtn();
     }).catch(function () {
+      aiOn = false;
       ['f-ai-btn', 'g-ai-btn'].forEach(function (id) {
         var el = $(id);
         if (el) el.hidden = true;
       });
+      syncExpireBtn();
+    });
+  }
+
+  /* ---------- 拍标签填到期日 ----------
+     只在食品 / 药品 / 日化出现：衣服和螺丝刀没有保质期，多一个按钮只会让人误会。
+     填完必须把「读到了什么、怎么算出来的」摆出来 —— 用户核对的是这行字，
+     不是那个日期本身。自动填，但绝不自动信。 */
+
+  var EXPIRY_CATS = ['食品', '药品', '日化'];
+
+  function syncExpireBtn() {
+    var btn = $('f-expire-btn');
+    if (!btn) return;
+    var cat = $('f-category') ? $('f-category').value : '';
+    btn.hidden = !(aiOn && EXPIRY_CATS.indexOf(cat) !== -1);
+  }
+
+  // 注意：这两个节点只用 textContent 写，绝不 innerHTML —— 里面混着模型读出来的字，
+  // 那是不受控的字符串，拼进 HTML 就等于让它往页面里塞标签。
+  function showExpiryRead(text, warn) {
+    var el = $('f-expire-read');
+    var main = $('f-expire-read-main');
+    var hint = $('f-expire-read-hint');
+    if (!el || !main || !hint) return;
+    if (!text) {
+      el.hidden = true;
+      main.textContent = '';
+      hint.textContent = '';
+      el.classList.remove('is-warn');
+      return;
+    }
+    main.textContent = text.main || '';
+    hint.textContent = text.hint || '';
+    el.hidden = false;
+    el.classList.toggle('is-warn', !!warn);
+  }
+
+  // 「读到「20260815 A3」｜生产日期 2026-08-15 + 保质期 12 个月 → 2027-08-15」+「对一下实物」
+  function expiryReadText(exp) {
+    var bits = [];
+    if (exp.rawText) bits.push('读到「' + exp.rawText + '」');
+    var shelf = exp.shelfLifeMonths ? (exp.shelfLifeMonths + ' 个月')
+      : (exp.shelfLifeDays ? (exp.shelfLifeDays + ' 天') : '');
+    if (exp.derived) {
+      bits.push('生产日期 ' + (exp.productionDate || '?') + ' + 保质期 ' + (shelf || '?') +
+        ' → ' + exp.expireDate);
+    } else {
+      bits.push('标签上印着 ' + exp.expireDate);
+    }
+    return {
+      main: bits.join('｜'),
+      hint: exp.confident >= 0.6 ? '对一下实物再保存' : '拿不准，务必对一下实物'
+    };
+  }
+
+  function runExpiryRecognize(file, btn) {
+    if (aiBusy || !file) return;
+    aiBusy = true;
+    var label = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = '正在看标签…';
+
+    compressImage(file, AI_MAX_SIDE).then(function (out) {
+      return apiSoft('/api/vision/expiry', {
+        method: 'POST', body: JSON.stringify({ image: out.dataUrl })
+      });
+    }).then(function (d) {
+      if (d && d.ok && d.expiry) {
+        $('f-expire').value = d.expiry.expireDate;
+        lastScannedDate = d.expiry.expireDate;
+        showExpiryRead(expiryReadText(d.expiry), d.expiry.confident < 0.6);
+        toast('已按标签填好到期日，核对一下');
+      } else {
+        // 认不出就只说话，绝不动日期框 —— 那里可能是用户手填的值
+        toast((d && d.hint) || '没认出日期，先手动填吧');
+      }
+    }).catch(function (err) {
+      toast(err.message || '识别不可用，先手动填吧');
+    }).then(function () {
+      aiBusy = false;
+      btn.disabled = false;
+      btn.innerHTML = label;
     });
   }
 
@@ -317,7 +404,11 @@
     if (draft.name) nameEl.value = draft.name;
 
     if (isItem) {
-      if (draft.category && $('f-category')) $('f-category').value = draft.category;
+      if (draft.category && $('f-category')) {
+        $('f-category').value = draft.category;
+        // 识别出是食品/药品，拍标签按钮要当场出现 —— 否则用户还得自己去改一次类目
+        syncExpireBtn();
+      }
       if (draft.category === '衣物') {
         // 识别出是衣服，就把类型和颜色一起填好 —— 这是「拍一张就能进衣柜」的关键
         if (draft.wearType) $('f-weartype').value = draft.wearType;
@@ -368,7 +459,7 @@
     btn.textContent = '正在认…';
 
     compressImage(file, AI_MAX_SIDE).then(function (out) {
-      return api('/api/vision/recognize', {
+      return apiSoft('/api/vision/recognize', {
         method: 'POST', body: JSON.stringify({ image: out.dataUrl })
       });
     }).then(function (d) {
@@ -406,6 +497,31 @@
       runRecognize(file, kind, btn);
     });
   });
+
+  // 拍标签：按钮和文件框只在这几类物品上有意义
+  (function () {
+    var btn = $('f-expire-btn');
+    var input = $('f-expire-file');
+    if (!btn || !input) return;
+    btn.addEventListener('click', function () { input.click(); });
+    input.addEventListener('change', function () {
+      var file = input.files && input.files[0];
+      input.value = '';   // 允许连着拍同一张
+      if (!file) return;
+      // 标签照片不进物品照片区：它是凭证，不是这件东西长什么样
+      runExpiryRecognize(file, btn);
+    });
+    // 用户自己动手改了日期，那行「怎么算出来的」就不再适用，收起来
+    var el = $('f-expire');
+    if (el) {
+      el.addEventListener('change', function () {
+        if (el.value !== lastScannedDate) {
+          lastScannedDate = null;
+          showExpiryRead('');
+        }
+      });
+    }
+  })();
 
   function uploadPhoto(id, dataUrl) {
     var base64 = dataUrl.indexOf('base64,') !== -1 ? dataUrl.split('base64,')[1] : dataUrl;
@@ -1679,6 +1795,8 @@
     var on = !!$('f-category') && $('f-category').value === '衣物';
     row.hidden = !on;
     $('f-colors-row').hidden = !on;
+    // 类目变了，拍标签按钮也要跟着变：选了食品才该出现
+    syncExpireBtn();
   }
 
   // 「借给谁」只有状态是「借出了」才显示，否则留着只会让人困惑
@@ -1699,6 +1817,8 @@
     setColorChips([]);
     if ($('f-state')) $('f-state').value = 'in_use';
     if ($('f-expire')) $('f-expire').value = '';
+    lastScannedDate = null;
+    showExpiryRead('');
     if ($('f-remind')) $('f-remind').value = '';
     if ($('f-minqty')) $('f-minqty').value = '';
     syncLendField();
@@ -1753,6 +1873,9 @@
     syncWearType();
     setColorChips(item.wear && item.wear.colors ? item.wear.colors : []);
     $('f-expire').value = item.expireAt || '';
+    // 编辑老物品时，上一次拍标签的「读到…」和这个日期无关，不能留在屏幕上
+    lastScannedDate = null;
+    showExpiryRead('');
     $('f-remind').value = item.remindDays == null ? '' : item.remindDays;
     $('f-minqty').value = item.minQty == null ? '' : item.minQty;
     $('f-lendto').value = item.lendTo || '';

@@ -384,6 +384,25 @@ async function handleApi(req, res, pathname, query) {
     return web.sendJSON(res, 200, out);
   }
 
+  // 拍标签只读日期，不认东西：和上面同一个开关、同一套降级，
+  // 但只回一个算好的到期日 —— 生产日期和保质期是过程，不进库。
+  if (pathname === '/api/vision/expiry' && req.method === 'POST') {
+    if (!notifySettings.aiReady()) {
+      return web.sendJSON(res, 404, { ok: false, error: '没有启用拍照识别' });
+    }
+    if (!guard(res, ctx, 'write')) return;
+    const body = await web.readBody(req, web.MAX_PHOTO_BODY);
+    if (!body.image && !body.data) {
+      return web.sendJSON(res, 400, { ok: false, error: '没有收到图片' });
+    }
+    const out = await vision.recognizeExpiry(body.image || body.data, notifySettings.raw().ai);
+    if (!out.ok && out.error) {
+      return web.sendJSON(res, 400, { ok: false, error: out.error });
+    }
+    // 认不出日期也是 200：前端出一行灰字，日期框留空，绝不挡着保存
+    return web.sendJSON(res, 200, out);
+  }
+
   /* ---------- 导出 / 回灌 ---------- */
 
   if (pathname === '/api/export' && req.method === 'GET') {

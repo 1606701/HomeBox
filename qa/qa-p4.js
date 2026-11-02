@@ -137,6 +137,9 @@ async function main() {
   const r1 = await req(base, 'POST', '/api/vision/recognize',
     { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
   check('未启用时识别接口 404', r1.status === 404, String(r1.status));
+  const r1b = await req(base, 'POST', '/api/vision/expiry',
+    { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  check('未启用时拍标签接口也 404', r1b.status === 404, String(r1b.status));
 
   // 2. 启用（指向 mock）
   const save = await req(base, 'PUT', '/api/notify/settings', {
@@ -210,6 +213,82 @@ async function main() {
   check('上游 500 → 200 + unavailable', err500.status === 200 && err500.json.unavailable === true,
     JSON.stringify(err500.json));
   mockStatus = 200;
+
+  // 6b. 拍标签读生产日期 / 保质期
+  //
+  // 这一节验的不是「模型读得准不准」—— 那只能拿真照片看，本地 mock 验不了。
+  // 这里验的是**算得对不对、以及不肯算的时候有没有说实话**：
+  // 模型只负责把标签上的字读出来，到期日必须由服务端算；边界（闰年、月末、
+  // 未来日期）全部由代码兜住。附带断言 rawText 一定回传 —— 那是用户唯一
+  // 能拿来核对的依据，丢了这一整条就等于「黑箱给了一个日期」。
+  const shot = (reply) => {
+    mockReply = reply;
+    return req(base, 'POST', '/api/vision/expiry',
+      { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  };
+
+  const e1 = await shot('{"rawText":"生产日期 20260815 保质期 12 个月","productionDate":"20260815","expireDate":null,"shelfLifeMonths":12,"shelfLifeDays":null,"confident":0.9}');
+  check('生产日期 + 12 个月 → 2027-08-15',
+    e1.json.ok === true && e1.json.expiry.expireDate === '2027-08-15', JSON.stringify(e1.json));
+  check('回传读到的原文（用户靠它核对）',
+    !!e1.json.expiry && /20260815/.test(e1.json.expiry.rawText), JSON.stringify(e1.json.expiry));
+  check('推算出来的标记 derived=true', e1.json.expiry && e1.json.expiry.derived === true,
+    JSON.stringify(e1.json.expiry));
+
+  // 标签上直接印着到期日：印的比算的权威，不该再算一遍
+  const e2 = await shot('{"rawText":"保质期至 2027.02.28","productionDate":null,"expireDate":"2027-02-28","shelfLifeMonths":null,"shelfLifeDays":null,"confident":0.85}');
+  check('直接印的到期日原样采用',
+    e2.json.expiry.expireDate === '2027-02-28' && e2.json.expiry.derived === false,
+    JSON.stringify(e2.json));
+
+  // 保质期以天为单位（面包、酸奶、生鲜很常见）
+  const e3 = await shot('{"rawText":"20261028 保质期 7 天","productionDate":"2026-10-28","shelfLifeMonths":null,"shelfLifeDays":7,"confident":0.8}');
+  check('生产日期 + 7 天 → 2026-11-04', e3.json.expiry.expireDate === '2026-11-04',
+    JSON.stringify(e3.json));
+
+  // 月末溢出：1 月 31 日 + 1 个月 = 2 月 28 日，不是 3 月 3 日
+  const e4 = await shot('{"productionDate":"2026-01-31","shelfLifeMonths":1,"confident":0.9}');
+  check('1 月 31 日 + 1 个月落到 2 月 28 日', e4.json.expiry.expireDate === '2026-02-28',
+    JSON.stringify(e4.json));
+
+  // 2 月 29 日在平年不存在，模型给的日期必须被当成读错，不能悄悄挪成 3 月 1 日
+  const e5 = await shot('{"productionDate":"2026-02-29","shelfLifeMonths":1,"confident":0.9}');
+  check('平年 2 月 29 日被拒绝，不瞎填', e5.json.ok === false && e5.json.unavailable === true,
+    JSON.stringify(e5.json));
+
+  // 生产日期在未来：至少有一个字段读错了，宁可不算
+  const e6 = await shot('{"productionDate":"2099-01-01","shelfLifeMonths":6,"confident":0.95}');
+  check('未来生产日期被拒绝', e6.json.ok === false && e6.json.unavailable === true,
+    JSON.stringify(e6.json));
+
+  // 标签上压根没有日期：必须老实说没有，不能照着「常见的 12 个月」编一个
+  const e7 = await shot('{"rawText":"净含量 500ml 配料 水 白砂糖","productionDate":null,"expireDate":null,"shelfLifeMonths":null,"shelfLifeDays":null,"confident":0.1}');
+  check('标签没日期 → 200 + unavailable', e7.status === 200 && e7.json.unavailable === true,
+    JSON.stringify(e7.json));
+  check('没日期时说清是「没找到」', /没找到日期/.test(String(e7.json.hint)), String(e7.json.hint));
+
+  // 只读到生产日期、没找到保质期：比全空强，但仍然不能填
+  const e8 = await shot('{"rawText":"生产日期 20260815","productionDate":"2026-08-15","shelfLifeMonths":null,"shelfLifeDays":null,"confident":0.7}');
+  check('只有生产日期时不填，且 hint 指出缺保质期',
+    e8.json.ok === false && /没找到保质期/.test(String(e8.json.hint)), JSON.stringify(e8.json));
+
+  // 上游 500 与坏 JSON 在拍标签上同样只是降级，不是错误弹窗
+  mockStatus = 500;
+  const e9 = await req(base, 'POST', '/api/vision/expiry',
+    { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  check('拍标签：上游 500 → 200 + unavailable', e9.status === 200 && e9.json.unavailable === true,
+    JSON.stringify(e9.json));
+  mockStatus = 200;
+
+  mockReply = '这张标签有点糊，我看不太清。';
+  const e10 = await req(base, 'POST', '/api/vision/expiry',
+    { cookie, body: { image: 'data:image/jpeg;base64,AAAA' } });
+  check('拍标签：模型说散文 → 200 + unavailable',
+    e10.status === 200 && e10.json.unavailable === true, JSON.stringify(e10.json));
+
+  // 空图片是参数错误，不是「识别不出来」
+  const e11 = await req(base, 'POST', '/api/vision/expiry', { cookie, body: {} });
+  check('拍标签：没图 → 400', e11.status === 400, String(e11.status));
 
   // 7. 导出
   // 原来断言「至少 26 件」= 把 P1 种子的规模写死。真实库已被用户增删过（现 31 件），
