@@ -6,7 +6,7 @@
 
   // 必须与 index.html 里 style.css / app.js 的 ?v= 保持一致。
   // 页面底部会把它显示出来，一眼就能确认浏览器拿到的是不是最新代码。
-  var APP_VERSION = 'v19';
+  var APP_VERSION = 'v20';
 
   // 8 个固定类目：统计维度靠它聚合，所以不做自由输入
   var CATEGORIES = ['衣物', '食品', '药品', '日化', '工具', '电子', '文具', '其他'];
@@ -27,6 +27,8 @@
     byId: {},
     query: '',
     editingId: null,
+    // 打开编辑表单那一刻读到的版本，提交时带回去做并发校验
+    editingUpdatedAt: null,
     activeLocId: null,
     innerId: null,
     editMode: false,
@@ -159,7 +161,13 @@
         return res.json().catch(function () { throw new Error('服务端返回异常'); });
       })
       .then(function (data) {
-        if (!data || data.ok === false) throw new Error((data && data.error) || '操作失败');
+        if (!data || data.ok === false) {
+          // 把原始响应挂在错误上：409 冲突、429 限流这些要拿 status / 附加字段做分支，
+          // 只留一句话的话上层就没法区分「错了」和「被人抢先改过了」
+          var err = new Error((data && data.error) || '操作失败');
+          err.payload = data || null;
+          throw err;
+        }
         return data;
       });
   }
@@ -1827,6 +1835,7 @@
 
   function resetForm() {
     state.editingId = null;
+    state.editingUpdatedAt = null;
     itemPhotos.reset(null);
     $('form-title').textContent = '记一件东西';
     $('submit-btn').textContent = '保存';
@@ -1857,6 +1866,7 @@
     var item = state.items.filter(function (i) { return i.id === id; })[0];
     if (!item) { toast('找不到这条记录，请重新搜索'); return; }
     state.editingId = id;
+    state.editingUpdatedAt = item.updatedAt || null;
     $('form-title').textContent = '编辑：' + item.name;
     $('submit-btn').textContent = '更新';
     $('cancel-edit').hidden = false;
@@ -1897,10 +1907,11 @@
     if (!can('remove')) { toast('当前身份不能删东西'); return; }
     var item = state.items.filter(function (i) { return i.id === id; })[0];
     var label = item ? item.name : '这条记录';
-    if (!window.confirm('确定删除「' + label + '」吗？')) return;
+    // 说清「能捡回来」，人才敢点；真删的那个按钮在回收站里，措辞要更重
+    if (!window.confirm('把「' + label + '」移入回收站？\n\n之后可以在「设置 → 回收站」里找回。')) return;
     api('/api/items/' + encodeURIComponent(id), { method: 'DELETE' })
       .then(function () {
-        toast('已删除');
+        toast('已移入回收站');
         state.wb.stale = true;
         return Promise.all([loadLocations(), doSearch()]);
       })
@@ -1994,6 +2005,8 @@
 
     var isEdit = !!state.editingId;
     var targetId = state.editingId;
+    // 带上打开表单时的版本：中间有人改过，服务端会回 409 而不是默默覆盖
+    if (isEdit && state.editingUpdatedAt) payload.baseUpdatedAt = state.editingUpdatedAt;
     var req = isEdit
       ? api('/api/items/' + encodeURIComponent(targetId), {
           method: 'PUT', body: JSON.stringify(payload)
@@ -2029,7 +2042,18 @@
       });
     }).then(function () {
       if (!isEdit) doSearch();
-    }).catch(function (err) { toast(err.message); });
+    }).catch(function (err) {
+      var p = err && err.payload;
+      if (p && p.conflict) {
+        // 有人在这中间改过。说清楚，并把基线更新到最新版本 ——
+        // 用户看过提示后再点一次「更新」，就是他明确要覆盖，不再拦。
+        state.editingUpdatedAt = (p.current && p.current.updatedAt) || null;
+        toast('这件东西刚被别人改过，已同步到最新版本；确认无误再点一次「更新」');
+        doSearch();
+        return;
+      }
+      toast(err.message);
+    });
   });
 
   /* ---------- 衣柜：找衣服 ---------- */
@@ -2749,6 +2773,103 @@
   var JOB_STATUS_TEXT = { ok: '成功', failed: '失败', skipped: '跳过', running: '进行中' };
   var MAIL_STATUS_TEXT = { sent: '已发送', failed: '失败', pending: '待发送' };
 
+  /* ---------- 回收站 ---------- */
+
+  // 存的是 ISO 字符串，列表里只要「11-10 22:30」这种能认出来的精度
+  function fmtDeletedAt(iso) {
+    var s = String(iso || '');
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+    return m ? (m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : s.slice(0, 16);
+  }
+
+  function trashEmpty(text) {
+    var box = $('s-trash-list');
+    box.textContent = '';
+    var p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = text;
+    box.appendChild(p);
+  }
+
+  function loadTrash() {
+    var box = $('s-trash-list');
+    if (!box) return Promise.resolve();
+    return api('/api/trash').then(function (d) {
+      var list = (d && d.items) || [];
+      if (!list.length) { trashEmpty('回收站是空的。'); return; }
+      box.textContent = '';
+      list.forEach(function (it) { box.appendChild(trashRow(it)); });
+    }).catch(function (err) {
+      trashEmpty('读不到回收站：' + err.message);
+    });
+  }
+
+  // 用 DOM API 拼，不用 innerHTML —— 物品名是用户输入，不该有机会变成标签
+  function trashRow(it) {
+    var row = document.createElement('div');
+    row.className = 'trash-row';
+
+    var main = document.createElement('div');
+    main.className = 'trash-main';
+    var name = document.createElement('b');
+    name.className = 'trash-name';
+    name.textContent = it.name + (it.qty > 1 ? ' ×' + it.qty : '');
+    var meta = document.createElement('span');
+    meta.className = 'trash-meta';
+    // 带上位置和删除时间：只靠名字，有时想不起来删的是哪一个
+    meta.textContent = (it.path || '未归档') + ' · ' + fmtDeletedAt(it.deletedAt) + ' 删的';
+    main.appendChild(name);
+    main.appendChild(meta);
+
+    var acts = document.createElement('div');
+    acts.className = 'trash-acts';
+    var back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'mini';
+    back.textContent = '恢复';
+    back.addEventListener('click', function () { restoreTrash(it); });
+    var kill = document.createElement('button');
+    kill.type = 'button';
+    kill.className = 'mini danger';
+    kill.textContent = '彻底删除';
+    kill.addEventListener('click', function () { purgeOne(it); });
+    acts.appendChild(back);
+    acts.appendChild(kill);
+
+    row.appendChild(main);
+    row.appendChild(acts);
+    return row;
+  }
+
+  function restoreTrash(it) {
+    api('/api/trash/' + encodeURIComponent(it.id) + '/restore', { method: 'POST' })
+      .then(function () {
+        toast('已找回：' + it.name);
+        state.wb.stale = true;
+        return Promise.all([loadLocations(), loadTrash(), doSearch()]);
+      })
+      .catch(function (err) { toast(err.message); });
+  }
+
+  function purgeOne(it) {
+    if (!window.confirm('彻底删除「' + it.name + '」？\n\n这一步无法撤销，照片也会一起删掉。')) return;
+    api('/api/trash/' + encodeURIComponent(it.id), { method: 'DELETE' })
+      .then(function () { toast('已彻底删除'); return loadTrash(); })
+      .catch(function (err) { toast(err.message); });
+  }
+
+  if ($('s-trash-refresh')) {
+    $('s-trash-refresh').addEventListener('click', function () { loadTrash(); });
+  }
+  if ($('s-trash-empty')) {
+    $('s-trash-empty').addEventListener('click', function () {
+      if (!window.confirm('清空回收站？\n\n里面的东西会被彻底删除，照片也一起没。')) return;
+      api('/api/trash', { method: 'DELETE' })
+        .then(function (d) { toast('已清空 ' + ((d && d.purged) || 0) + ' 件'); return loadTrash(); })
+        .catch(function (err) { toast(err.message); });
+    });
+  }
+
   function openSettings() {
     if (!can('settings')) return;
     if (state.tab !== 'settings') state.prevTab = state.tab;
@@ -2757,6 +2878,7 @@
     loadNotifySettings();
     loadBackupStatus();
     loadJobStatus();
+    loadTrash();
   }
 
   $('settings-back').addEventListener('click', function () {

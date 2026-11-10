@@ -1,0 +1,49 @@
+name: QA
+
+# 改动后自动跑一遍。零依赖，不需要 npm install，几十秒出结果。
+#
+# 为什么 CI 里只跑 smoke 不跑 npm run qa：
+#   完整的 QA 套件要以「用户真实库的一份副本」当 fixture（data/homebox.db），
+#   并且前后比对真实文件的 sha256 —— 那是为了证明「测试没有碰真实数据」。
+#   真实库在 .gitignore 里，CI 上并不存在，硬跑会直接挂在读文件上。
+#   smoke 自带一份全新的临时数据目录，能覆盖启动、迁移、增删改查、照片、鉴权，
+#   是能在干净环境里跑的那部分。本地该跑的 npm run qa 一行没少。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Node 版本
+        run: node -v
+
+      - name: 语法检查（所有 .js）
+        run: |
+          fail=0
+          for f in $(git ls-files '*.js'); do
+            node --check "$f" || { echo "语法错误：$f"; fail=1; }
+          done
+          exit $fail
+
+      - name: 冒烟测试
+        run: npm run smoke
+
+      - name: 完整 QA（只有仓库里带了真实库副本时才跑）
+        run: |
+          if [ -f data/homebox.db ]; then
+            npm run qa
+          else
+            echo "没有 data/homebox.db，跳过完整 QA（见本文件顶部说明）"
+          fi

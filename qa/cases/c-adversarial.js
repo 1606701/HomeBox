@@ -241,13 +241,28 @@ function register(runner, ctx) {
       expect.eq(util.listFiles(photoDir).length, baseline, '超尺寸图片不能留下孤儿文件');
 
       // 3) 请求体超过 9MB → 413（读请求体之前就拦掉）
+      //
+      // 这里会偶发 ECONNRESET：服务端一看 Content-Length 超限就直接回 413 并关连接，
+      // 而客户端还在往外写 9MB —— 谁先发现取决于时序，不是缺陷。
+      // 真正要守的不变式是「大包被拒、服务还活着、不留孤儿文件」，
+      // 所以把「连接被重置」也算作拒绝，但必须仍有下面两条断言兜着。
       const huge = Buffer.alloc(Math.floor(7 * 1024 * 1024));
       huge[0] = 0xff; huge[1] = 0xd8; huge[2] = 0xff;
-      const hugeRes = await httpc.request(base, 'POST',
-        '/api/items/' + encodeURIComponent(id) + '/photo',
-        { body: { data: huge.toString('base64') }, timeout: 60000 });
-      expect.eq(hugeRes.status, 413, '超过 9MB 的请求体应 413，实际 ' + hugeRes.status);
-      expect.eq(util.listFiles(photoDir).length, baseline, '413 之后不能留下孤儿文件');
+      let hugeRes = null;
+      try {
+        hugeRes = await httpc.request(base, 'POST',
+          '/api/items/' + encodeURIComponent(id) + '/photo',
+          { body: { data: huge.toString('base64') }, timeout: 60000 });
+      } catch (err) {
+        expect.ok(/ECONNRESET|EPIPE|socket hang up/.test(String(err && err.message)),
+          '只有「连接被重置」能当作拒绝，其他错误仍算失败：' + (err && err.message));
+      }
+      if (hugeRes) expect.eq(hugeRes.status, 413, '超过 9MB 的请求体应 413，实际 ' + hugeRes.status);
+      expect.eq(util.listFiles(photoDir).length, baseline, '超限之后不能留下孤儿文件');
+
+      // 服务必须还活着：紧接着发一条正常请求，能应答才算「拒绝了但没崩」
+      const alive = await httpc.request(base, 'GET', '/api/locations');
+      expect.eq(alive.status, 200, '超限上传之后服务应仍然可用，实际 ' + alive.status);
 
       // 4) 正常上传一张真实 PNG → 200，文件真落盘
       const png = realPng(repoRoot);
@@ -269,8 +284,15 @@ function register(runner, ctx) {
       expect.eq(fetched.raw.length, png.length, '取回的照片字节数应与原图一致');
       expect.ok(fetched.raw.equals(png), '取回的照片内容应与原图逐字节相同');
 
+      // 6) 删除之后照片**先留着**（软删除，回收站里还要能看见这张图），
+      //    彻底删除才真正回收文件。这两步合起来才是「文件不会无限堆积」的完整保证。
       await httpc.request(base, 'DELETE', '/api/items/' + encodeURIComponent(id));
-      expect.eq(util.listFiles(photoDir).length, baseline, '删物品应连带删掉它的照片文件');
+      expect.eq(util.listFiles(photoDir).length, baseline + 1,
+        '软删除时照片文件应保留，否则从回收站恢复回来会是一张空壳');
+
+      await httpc.request(base, 'DELETE', '/api/trash/' + encodeURIComponent(id));
+      expect.eq(util.listFiles(photoDir).length, baseline,
+        '彻底删除应回收照片文件，否则卡会被删过的东西慢慢占满');
     }, { repro: 'node qa/qa-p1.js --only C3' });
 
   runner.test('C4', '照片生命周期：换图删旧图、显式删照片、无照片时 DELETE 幂等', async () => {

@@ -10,7 +10,7 @@
 <meta name="description" content="家庭收纳检索工具，可视化查看东西放在家里的哪个位置" />
 <link rel="icon" href="favicon.svg" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="stylesheet" href="style.css?v=19" />
+<link rel="stylesheet" href="style.css?v=20" />
 </head>
 <body>
 
@@ -720,7 +720,21 @@
         <p class="errbox" id="s-data-msg" hidden></p>
       </div>
 
-      <!-- 卡 6 · 运行状态 -->
+      <!-- 卡 6 · 回收站 -->
+      <div class="card set-card">
+        <p class="set-title">回收站</p>
+        <p class="set-sub">删掉的东西先放这儿，随时能捡回来。这里的东西不参与搜索、提醒和金额统计，也不进备份。</p>
+        <div class="trash-list" id="s-trash-list">
+          <p class="hint">正在读取…</p>
+        </div>
+        <div class="actions">
+          <button type="button" class="ghost" id="s-trash-refresh">刷新</button>
+          <button type="button" class="ghost danger" id="s-trash-empty">清空回收站</button>
+        </div>
+        <p class="errbox" id="s-trash-msg" hidden></p>
+      </div>
+
+      <!-- 卡 7 · 运行状态 -->
       <div class="card set-card">
         <p class="set-title">运行状态</p>
         <div class="set-kv" id="s-job-list">
@@ -787,6 +801,6 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<script src="app.js?v=19"></script>
+<script src="app.js?v=20"></script>
 </body>
 </html>

@@ -1923,6 +1923,26 @@ input[type='checkbox'] {
 .expire-read.is-warn { color: #8a4b2a; background: #fbf1e8; border-left-color: #d79164; }
 /* 「对一下实物」是嘱咐，不是证据，单独一行、淡一点 */
 .expire-read-hint { display: block; margin-top: 3px; opacity: .78; }
+
+/* ---------- 回收站 ---------- */
+
+.trash-list { margin: 4px 0 10px; }
+.trash-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 0; border-bottom: 1px dashed rgba(120, 100, 70, .18);
+}
+.trash-row:last-child { border-bottom: 0; }
+.trash-main { flex: 1 1 200px; min-width: 0; }
+.trash-name {
+  display: block; font-size: 14px; color: #3f3529;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trash-meta {
+  display: block; margin-top: 2px;
+  font-size: 12px; color: #8b7f6d;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trash-acts { display: flex; gap: 6px; flex: 0 0 auto; }
 .ai-ico {
   width: 14px; height: 14px; border: 1.5px solid #9c8a72; border-radius: 4px;
   position: relative; flex: 0 0 auto;

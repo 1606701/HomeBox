@@ -32,6 +32,7 @@ const backup = require('./lib/backup');
 const vision = require('./lib/vision');
 const importer = require('./lib/importer');
 const scheduler = require('./lib/scheduler');
+const ratelimit = require('./lib/ratelimit');
 const util = require('./lib/util');
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -194,9 +195,31 @@ async function handleApi(req, res, pathname, query) {
     if (!row) return web.sendJSON(res, 404, { ok: false, error: '没有这个人' });
 
     if (row.pass_hash) {
+      const ip = (req.socket && req.socket.remoteAddress) || '';
+      const gate = ratelimit.check(id, ip);
+      if (gate.locked) {
+        const mins = Math.ceil(gate.retryAfterSec / 60);
+        return web.sendJSON(res, 429, {
+          ok: false,
+          error: '密码错太多次了，' + mins + ' 分钟后再试',
+          retryAfterSec: gate.retryAfterSec
+        });
+      }
       // 设过密码的成员必须验密码
       const checked = members.checkPassword(id, body.password);
-      if (!checked.ok) return web.sendJSON(res, 401, { ok: false, error: '密码不对' });
+      if (!checked.ok) {
+        const after = ratelimit.fail(id, ip);
+        const left = after.locked ? 0 : after.left;
+        // 剩几次要告诉人：不然「再试一次还是错」会被误判成密码记错了
+        return web.sendJSON(res, 401, {
+          ok: false,
+          error: after.locked
+            ? '密码错太多次了，' + Math.ceil(after.retryAfterSec / 60) + ' 分钟后再试'
+            : '密码不对，还能试 ' + left + ' 次',
+          left: left
+        });
+      }
+      ratelimit.clear(id, ip);
     }
     const member = members.getAuth(id);
     members.touch(id);
@@ -706,6 +729,21 @@ async function handleApi(req, res, pathname, query) {
       const patch = Object.assign({}, body);
       const cents = priceArg(body);
       if (cents !== undefined) patch.priceCents = cents;
+      // 前端会带上「打开表单那一刻读到的 updatedAt」。没带就退化成老行为（后写覆盖），
+      // 这样第三方脚本 / 老缓存页面不会因为这条新规则直接挂掉。
+      const base = body.baseUpdatedAt ? String(body.baseUpdatedAt) : '';
+      if (base) {
+        const out = items.updateGuarded(id, patch, base);
+        if (out.conflict) {
+          return web.sendJSON(res, 409, {
+            ok: false,
+            conflict: true,
+            error: '这件东西刚被别人改过，先看看最新内容再改',
+            current: roles.forItem(out.current, ctx.role)
+          });
+        }
+        return web.sendJSON(res, 200, { ok: true, item: roles.forItem(out.item, ctx.role) });
+      }
       const item = items.update(id, patch);
       return web.sendJSON(res, 200, { ok: true, item: roles.forItem(item, ctx.role) });
     }
@@ -713,8 +751,44 @@ async function handleApi(req, res, pathname, query) {
     if (req.method === 'DELETE') {
       if (!guard(res, ctx, 'remove')) return;
       const gone = items.remove(id);
-      // 东西删了，它的照片也就没用了
-      if (gone && gone.photo) photos.deletePhotoFile(gone.photo);
+      // 照片文件**不删**：东西还在回收站里，捡回来不能是一张空壳。
+      // 只有「彻底删除」才动文件，见 /api/trash/:id 的 DELETE。
+      // 返回体保持旧的 {ok:true}：软删是内部语义，前端不需要知道，
+      // 老客户端也不用跟着改。
+      if (!gone) return web.sendJSON(res, 404, { ok: false, error: '物品不存在' });
+      return web.sendJSON(res, 200, { ok: true });
+    }
+  }
+
+  /* ---------- 回收站 ---------- */
+
+  if (pathname === '/api/trash') {
+    if (!guard(res, ctx, 'remove')) return;
+    if (req.method === 'GET') {
+      return web.sendJSON(res, 200, { ok: true, items: items.listDeleted() });
+    }
+    if (req.method === 'DELETE') {
+      const gone = items.purgeAll();
+      gone.forEach((it) => { if (it.photo) photos.deletePhotoFile(it.photo); });
+      return web.sendJSON(res, 200, { ok: true, purged: gone.length });
+    }
+  }
+
+  const trashMatch = pathname.match(/^\/api\/trash\/([^/]+)(\/restore)?$/);
+  if (trashMatch) {
+    if (!guard(res, ctx, 'remove')) return;
+    const tid = decodeURIComponent(trashMatch[1]);
+
+    if (trashMatch[2] && req.method === 'POST') {
+      const back = items.restore(tid);
+      if (!back) return web.sendJSON(res, 404, { ok: false, error: '回收站里没有这件' });
+      return web.sendJSON(res, 200, { ok: true, item: roles.forItem(back, ctx.role) });
+    }
+
+    if (req.method === 'DELETE') {
+      const gone = items.purge(tid);
+      if (!gone) return web.sendJSON(res, 404, { ok: false, error: '回收站里没有这件' });
+      if (gone.photo) photos.deletePhotoFile(gone.photo);
       return web.sendJSON(res, 200, { ok: true });
     }
   }
